@@ -72,6 +72,10 @@ SQLite is Donna's local store. It stores synced Microsoft data, todos, memories,
 
 It must not store raw Donna chat transcripts.
 
+The database path is configured in `[data].database_path`; on Linux the default
+is under `~/.local/share/donna/`. The storage layer applies migrations on open
+and records applied migration versions in `schema_migrations`.
+
 Recommended storage areas:
 - `memories`
 - `todos`
@@ -85,7 +89,10 @@ Recommended storage areas:
 - `sync_state`
 - `audit_log`
 
-SQLite FTS5 should be used for local search over relevant text fields.
+SQLite FTS5 is used for the shared `search_index` over relevant local records.
+Offline and stale-data state is represented through `local_state` and
+`sync_state` records, so the UI can surface network failures without losing
+local access.
 
 ## AI Provider Layer
 Donna uses a provider abstraction over configured models.
@@ -204,7 +211,7 @@ External actions are not executed offline unless explicitly queued and clearly s
 - Secrets: `keyring`
 - HTTP: `reqwest`
 - Async: `tokio`
-- SQLite: `sqlx`
+- SQLite: `rusqlite`
 - Cron: `croner` or `cron`
 - File watching: `notify`
 - Markdown: `pulldown-cmark`

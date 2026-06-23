@@ -1,0 +1,21 @@
+[package]
+name = "donna"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+directories = "6"
+eframe = "0.34"
+image = { version = "0.25", default-features = false, features = ["png"] }
+keyring = "3"
+rusqlite = { version = "0.37", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+[dev-dependencies]
+ab_glyph = "0.2"
+egui_kittest = { version = "0.34", features = ["eframe"] }
+epaint_default_fonts = "0.34"
+tempfile = "3"

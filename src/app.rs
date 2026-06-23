@@ -2,8 +2,10 @@ use crate::avatar::{AvatarManager, AvatarState};
 use crate::chat::{ChatSession, Speaker};
 use crate::command::{AppCommand, ParsedInput, parse_input};
 use crate::config::AppConfig;
+use crate::memory::{MemoryExtractor, SensitiveMemoryApproval};
 use crate::model::ModelRegistry;
 use crate::storage::LocalStore;
+use crate::tasks::TaskRunnerState;
 use eframe::egui::{
     self, Align, Button, CentralPanel, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin,
     RichText, ScrollArea, TextEdit, Vec2,
@@ -42,7 +44,9 @@ pub struct DonnaApp {
     config: AppConfig,
     config_notice: Option<String>,
     chat: ChatSession,
-    _store: Option<LocalStore>,
+    store: Option<LocalStore>,
+    memory_extractor: MemoryExtractor,
+    task_runner_state: TaskRunnerState,
     input: String,
     models: ModelRegistry,
     selected_model_id: String,
@@ -74,10 +78,12 @@ impl DonnaApp {
 
         Self {
             config_path,
+            memory_extractor: MemoryExtractor::from_config(&config.memory),
             config,
             config_notice,
             chat: ChatSession::with_welcome(),
-            _store: store,
+            store,
+            task_runner_state: TaskRunnerState::running(),
             input: String::new(),
             models,
             selected_model_id,
@@ -106,13 +112,16 @@ impl DonnaApp {
             ParsedInput::Empty => {}
             ParsedInput::Message(message) => {
                 self.state = DonnaState::Idle;
-                self.chat.push_user_message(message);
-                self.chat.push_donna_message(
-                    "Provider integration is not connected yet. I kept this exchange in memory only.",
-                );
+                self.chat.push_user_message(message.as_str());
+                let memory_note = self.persist_structured_chat_records(&message);
+                let model_label = self.models.selected_label(&self.selected_model_id);
+                self.chat.push_donna_message(format!(
+                    "{model_label} is selected for chat. {memory_note}"
+                ));
             }
             ParsedInput::Command(AppCommand::Exit) => {
                 self.state = DonnaState::Command;
+                self.task_runner_state.stop();
                 self.chat.push_user_message(input);
                 self.chat.push_donna_message("Exit requested.");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -160,6 +169,48 @@ impl DonnaApp {
             DonnaState::Idle => "Idle",
             DonnaState::Command => "Command",
             DonnaState::Hidden => "Hidden",
+        }
+    }
+
+    fn persist_structured_chat_records(&mut self, message: &str) -> String {
+        let extraction = self.memory_extractor.extract_user_message(message);
+        if extraction.memories.is_empty()
+            && extraction.sensitive_memories.is_empty()
+            && extraction.todos.is_empty()
+            && extraction.people.is_empty()
+        {
+            return "I kept this exchange in memory only.".to_owned();
+        }
+
+        let Some(store) = &self.store else {
+            return "I identified structured information, but local storage is unavailable."
+                .to_owned();
+        };
+
+        match self.memory_extractor.persist(
+            store,
+            &extraction,
+            SensitiveMemoryApproval::RejectSensitive,
+        ) {
+            Ok(persisted) if persisted.has_records() => {
+                let mut note = format!(
+                    "I saved {} structured item(s) and did not store the raw chat.",
+                    persisted.record_count()
+                );
+                if persisted.skipped_sensitive > 0 {
+                    note.push_str(" Sensitive memory needs approval and was not saved.");
+                }
+                note
+            }
+            Ok(persisted) if persisted.skipped_sensitive > 0 => {
+                "Sensitive memory needs approval and was not saved.".to_owned()
+            }
+            Ok(_) => "I kept this exchange in memory only.".to_owned(),
+            Err(error) => {
+                self.config_notice = Some(error.to_string());
+                "I could not save structured records because local storage returned an error."
+                    .to_owned()
+            }
         }
     }
 }

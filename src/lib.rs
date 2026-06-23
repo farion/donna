@@ -1,8 +1,13 @@
+pub mod ai;
 pub mod app;
+pub mod approval;
 pub mod avatar;
 pub mod chat;
 pub mod command;
 pub mod config;
+pub mod memory;
 pub mod model;
+pub mod prompts;
 pub mod secrets;
 pub mod storage;
+pub mod tasks;

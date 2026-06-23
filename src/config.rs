@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub ai: AiConfig,
     pub microsoft: MicrosoftConfig,
     pub notes: NotesConfig,
+    pub prompts: PromptsConfig,
     pub data: DataConfig,
     pub tasks: TaskConfig,
     pub memory: MemoryConfig,
@@ -76,6 +77,12 @@ pub struct MicrosoftConfig {
 #[serde(default)]
 pub struct NotesConfig {
     pub obsidian_vault_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PromptsConfig {
+    pub system_prompt_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -240,6 +247,21 @@ impl Default for TaskConfig {
     }
 }
 
+impl Default for PromptsConfig {
+    fn default() -> Self {
+        let system_prompt_path = BaseDirs::new()
+            .map(|base| {
+                base.config_dir()
+                    .join("donna")
+                    .join("prompts")
+                    .join("system.md")
+            })
+            .unwrap_or_else(|| PathBuf::from("prompts").join("system.md"));
+
+        Self { system_prompt_path }
+    }
+}
+
 impl Default for DataConfig {
     fn default() -> Self {
         let database_path = BaseDirs::new()
@@ -321,6 +343,14 @@ fn default_models() -> Vec<ModelConfig> {
             model: "gpt-4.1-mini".to_owned(),
             base_url: Some("https://api.openai.com/v1".to_owned()),
             secret_ref: Some("donna/openai".to_owned()),
+        },
+        ModelConfig {
+            id: "github-copilot-compatible".to_owned(),
+            label: "GitHub Copilot compatible".to_owned(),
+            provider: "github-copilot-compatible".to_owned(),
+            model: "gpt-4.1".to_owned(),
+            base_url: Some("https://api.githubcopilot.com".to_owned()),
+            secret_ref: Some("donna/github-copilot".to_owned()),
         },
     ]
 }

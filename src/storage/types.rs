@@ -117,6 +117,47 @@ pub struct SyncState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTaskRun {
+    pub task_id: String,
+    pub task_model_id: String,
+    pub status: String,
+    pub prompt_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRun {
+    pub id: i64,
+    pub task_id: String,
+    pub task_model_id: String,
+    pub status: String,
+    pub prompt_path: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub error_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTaskFinding {
+    pub task_run_id: Option<i64>,
+    pub kind: String,
+    pub summary: String,
+    pub source: String,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskFinding {
+    pub id: i64,
+    pub task_run_id: Option<i64>,
+    pub kind: String,
+    pub summary: String,
+    pub source: String,
+    pub created_at: i64,
+    pub dismissed_at: Option<i64>,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataFreshness {
     Fresh,
     Stale { error: Option<String> },

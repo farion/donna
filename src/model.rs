@@ -39,6 +39,24 @@ impl ModelRegistry {
             .or_else(|| self.models.first())
     }
 
+    pub fn model_by_id(&self, model_id: &str) -> Option<&ModelDefinition> {
+        self.models.iter().find(|model| model.id == model_id)
+    }
+
+    pub fn task_model(
+        &self,
+        default_model_id: &str,
+        task_override: Option<&str>,
+    ) -> Option<&ModelDefinition> {
+        let requested = task_override
+            .filter(|model_id| !model_id.trim().is_empty())
+            .unwrap_or(default_model_id);
+
+        self.model_by_id(requested)
+            .or_else(|| self.model_by_id(default_model_id))
+            .or_else(|| self.models.first())
+    }
+
     pub fn selected_label(&self, selected_id: &str) -> &str {
         self.selected_or_first(selected_id)
             .map(|model| model.label.as_str())
@@ -114,6 +132,32 @@ mod tests {
 
         let registry = ModelRegistry::from_config(&config);
 
-        assert_eq!(registry.models().len(), 2);
+        assert_eq!(registry.models().len(), 3);
+    }
+
+    #[test]
+    fn task_model_uses_task_configuration_not_selected_chat_model() {
+        let mut config = AppConfig::default();
+        config.ai.chat.selected_model = "openai-compatible".to_owned();
+        config.ai.tasks.default_model = "ollama-local".to_owned();
+        let registry = ModelRegistry::from_config(&config);
+
+        let model = registry
+            .task_model(&config.ai.tasks.default_model, None)
+            .expect("task model");
+
+        assert_eq!(model.id, "ollama-local");
+    }
+
+    #[test]
+    fn task_model_override_falls_back_to_default_when_missing() {
+        let config = AppConfig::default();
+        let registry = ModelRegistry::from_config(&config);
+
+        let model = registry
+            .task_model(&config.ai.tasks.default_model, Some("missing"))
+            .expect("fallback task model");
+
+        assert_eq!(model.id, "ollama-local");
     }
 }

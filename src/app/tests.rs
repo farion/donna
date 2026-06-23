@@ -74,6 +74,15 @@ fn hide_command_requests_window_minimize() {
     );
 }
 
+#[test]
+fn exit_command_stops_task_runner() {
+    let (_config_dir, mut harness) = app_harness(Vec2::new(720.0, 480.0));
+
+    submit_text(&mut harness, "/exit");
+
+    assert!(!harness.state().task_runner_state.is_running());
+}
+
 fn submit_text(harness: &mut Harness<'static, DonnaApp>, text: &str) {
     let ctx = harness.ctx.clone();
     harness.state_mut().input = text.to_owned();

@@ -73,6 +73,7 @@ The MVP desktop UI has an avatar area and a chat panel.
 - Press `Enter` or click `Send` to submit a message.
 - Press `Tab` to cycle configured chat models. Donna saves the selected model id
   back to TOML.
+- Donna follows the configured UI theme: `auto`, `light`, or `dark`.
 
 Donna currently responds in shell mode. It records your message in the in-memory
 session, attempts structured memory/todo/person extraction, and replies with the
@@ -83,16 +84,19 @@ normal conversation through a live AI provider response.
 
 Supported commands:
 
-- `/exit` closes the Donna window and stops the in-process task runner state.
+- `/exit` asks for confirmation before closing Donna. Use `/exit confirm` to
+  close the window and stop the in-process task runner state.
 - `/hide` asks the desktop environment to minimize Donna. Some Wayland
   compositors may ignore app-driven minimize requests; Donna shows a fallback
   note and keeps running.
+- `/changechar [name]` changes to an embedded avatar character and persists the
+  selection in `donna.toml`.
+- `/theme <mode>` changes the UI theme and persists it in `donna.toml`. Supported
+  modes are `auto`, `light`, and `dark`.
 
-Not yet supported:
-
-- `/changechar [name]` is listed in the documentation spec, but the current MVP
-  parser treats it as an unknown command. Change the avatar character in
-  `donna.toml` instead.
+Commands are handled locally before AI processing and do not enter the visible
+chat timeline. When the input starts with `/`, Donna shows compact suggestions
+for the supported commands. Unknown commands show an inline error near the input.
 
 ## Configuration
 
@@ -109,6 +113,7 @@ Example MVP config:
 
 ```toml
 [ui]
+theme = "auto"
 donna_message_color = "#eef5ff"
 user_message_color = "#eaf7ef"
 
@@ -191,6 +196,12 @@ Paths in the generated config use your actual home directory. If the config file
 is invalid TOML, Donna falls back to defaults for that launch and shows an error
 notice in the app.
 
+The `[ui].theme` value accepts:
+
+- `auto`: follow the operating system theme when available.
+- `light`: force Donna's light theme.
+- `dark`: force Donna's dark theme.
+
 ## AI Providers
 
 Donna's model list is configurable. Each model entry has:
@@ -242,7 +253,8 @@ When you send a message, Donna may extract structured records:
 Stored records use a source such as `donna_chat`, but they do not store the raw
 message as a transcript. Sensitive-looking memories containing words such as
 `password`, `secret`, `token`, `ssn`, `medical`, `health`, or `salary` require
-approval and are skipped by the current chat path.
+review. Donna keeps them as structured drafts in the current session until you
+save, edit, or delete them from the sensitive memory review card.
 
 Donna stores structured data in SQLite tables for memories, todos, people,
 follow-ups, task runs, task findings, synced Microsoft data, notes metadata, sync
@@ -432,8 +444,9 @@ Embedded state images include:
 - command
 
 The current UI uses idle frames during normal chat, command state for command
-handling, and attention state when `/hide` is requested. Missing characters or
-missing state images fall back to Donna's default image.
+input, thinking/question states for active response or approval work, and
+attention state for active attention items or when `/hide` is requested. Missing
+characters or missing state images fall back to Donna's default image.
 
 To change the configured character manually:
 
@@ -482,10 +495,10 @@ Ollama connection error
 Make sure Ollama is running and that the configured `base_url` uses plain
 `http://`. The current Ollama adapter does not support HTTPS endpoints.
 
-`Unknown command: /changechar`
+`Unknown avatar character: [name]`
 
-The MVP parser does not implement `/changechar [name]` yet. Edit `[avatar]` in
-TOML instead.
+Use `/changechar [name]` only with an embedded character folder. Donna keeps the
+current configured avatar when the requested character is unavailable.
 
 ## Local Verification
 

@@ -49,6 +49,34 @@ impl LocalStore {
             .map_err(StorageError::from)
     }
 
+    pub fn update_memory_content(
+        &self,
+        id: i64,
+        content: &str,
+    ) -> Result<StoredMemory, StorageError> {
+        let now = now_seconds()?;
+        self.connection.execute(
+            "UPDATE memories
+             SET content = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![content.trim(), now, id],
+        )?;
+
+        let memory = self.memory(id)?;
+        if memory.forgotten_at.is_some() {
+            self.delete_search_record("memory", memory.id)?;
+        } else {
+            self.replace_search_record(
+                "memory",
+                memory.id,
+                &memory.memory_type,
+                &memory.content,
+                &memory.source,
+            )?;
+        }
+        Ok(memory)
+    }
+
     pub fn forget_memory(&self, id: i64) -> Result<StoredMemory, StorageError> {
         let now = now_seconds()?;
         self.connection.execute(
@@ -58,6 +86,7 @@ impl LocalStore {
             params![now, id],
         )?;
 
+        self.delete_search_record("memory", id)?;
         self.memory(id)
     }
 

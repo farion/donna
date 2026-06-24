@@ -195,13 +195,22 @@ fn draw_avatar(image: &mut RgbaImage, x: f32, y: f32, side: f32, state: AvatarSt
     let avatar = image::load_from_memory(bytes.as_ref())
         .expect("decode avatar")
         .to_rgba8();
-    let image_side = (side * 0.82).round() as u32;
-    let avatar = image::imageops::resize(&avatar, image_side, image_side, FilterType::Lanczos3);
+    let image_size = avatar_image_size(
+        Vec2::new(avatar.width() as f32, avatar.height() as f32),
+        side,
+    );
+    if image_size.x <= 0.0 || image_size.y <= 0.0 {
+        return;
+    }
+
+    let image_width = image_size.x.round().max(1.0) as u32;
+    let image_height = image_size.y.round().max(1.0) as u32;
+    let avatar = image::imageops::resize(&avatar, image_width, image_height, FilterType::Lanczos3);
     overlay(
         image,
         &avatar,
-        x + (outer - image_side as f32) / 2.0,
-        y + (outer - image_side as f32) / 2.0,
+        x + (outer - image_width as f32) / 2.0,
+        y + (outer - image_height as f32) / 2.0,
     );
 }
 

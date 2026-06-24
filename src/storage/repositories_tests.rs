@@ -107,3 +107,47 @@ fn stale_sync_state_is_visible() {
         DataFreshness::NeverSynced
     );
 }
+
+#[test]
+fn corrects_memory_content_and_removes_forgotten_memory_from_search() {
+    let store = LocalStore::in_memory().expect("store");
+    let memory = store
+        .create_memory(&NewMemory {
+            memory_type: "fact".to_owned(),
+            content: "Fact: original sensitive credential note".to_owned(),
+            source: "donna_chat".to_owned(),
+            confidence: 0.8,
+            importance: 1,
+            expires_at: None,
+        })
+        .expect("create memory");
+
+    let corrected = store
+        .update_memory_content(memory.id, "Fact: corrected private vault reference")
+        .expect("correct memory");
+
+    assert_eq!(corrected.content, "Fact: corrected private vault reference");
+    assert!(
+        store
+            .search(&SearchQuery::text("original"))
+            .expect("search original")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .search(&SearchQuery::text("corrected"))
+            .expect("search corrected")[0]
+            .record_id,
+        memory.id
+    );
+
+    let forgotten = store.forget_memory(memory.id).expect("forget memory");
+
+    assert!(forgotten.forgotten_at.is_some());
+    assert!(
+        store
+            .search(&SearchQuery::text("corrected"))
+            .expect("search corrected after forget")
+            .is_empty()
+    );
+}

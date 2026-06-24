@@ -1,3 +1,10 @@
+#[path = "notes/actions.rs"]
+mod actions;
+
+pub use actions::{
+    NoteActionError, NoteActionReceipt, NoteEdit, NoteWrite, OBSIDIAN_TARGET, ObsidianNoteAdapter,
+};
+
 use crate::storage::{LocalStore, NewNoteMetadata, NoteMetadata, StorageError};
 use std::collections::BTreeSet;
 use std::error::Error;

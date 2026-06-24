@@ -11,6 +11,8 @@ pub enum AppCommand {
     Hide,
     ChangeCharacter(Option<String>),
     Theme(Option<String>),
+    Task(Option<String>),
+    Forget,
     Unknown(String),
 }
 
@@ -20,14 +22,14 @@ pub struct CommandSuggestion {
     pub summary: &'static str,
 }
 
-pub const COMMAND_SUGGESTIONS: [CommandSuggestion; 4] = [
+pub const COMMAND_SUGGESTIONS: [CommandSuggestion; 6] = [
     CommandSuggestion {
         command: "/hide",
         summary: "Minimize Donna and keep background tasks running.",
     },
     CommandSuggestion {
         command: "/exit",
-        summary: "Ask for confirmation before stopping Donna.",
+        summary: "Stop Donna.",
     },
     CommandSuggestion {
         command: "/changechar",
@@ -36,6 +38,14 @@ pub const COMMAND_SUGGESTIONS: [CommandSuggestion; 4] = [
     CommandSuggestion {
         command: "/theme",
         summary: "Set Donna's theme to auto, light, or dark.",
+    },
+    CommandSuggestion {
+        command: "/task",
+        summary: "Run a configured task now.",
+    },
+    CommandSuggestion {
+        command: "/forget",
+        summary: "Clear task reminder snoozes.",
     },
 ];
 
@@ -63,6 +73,15 @@ pub fn parse_input(input: &str) -> ParsedInput {
                     AppCommand::Theme(mode)
                 }
             }
+            "task" => {
+                let name = parts.next().map(|part| part.to_ascii_lowercase());
+                if parts.next().is_some() {
+                    AppCommand::Task(Some(String::new()))
+                } else {
+                    AppCommand::Task(name)
+                }
+            }
+            "forget" => AppCommand::Forget,
             other => AppCommand::Unknown(other.to_owned()),
         });
     }
@@ -70,12 +89,21 @@ pub fn parse_input(input: &str) -> ParsedInput {
     ParsedInput::Message(trimmed.to_owned())
 }
 
-pub fn command_suggestions(input: &str) -> &'static [CommandSuggestion] {
-    if input.trim_start().starts_with('/') {
-        &COMMAND_SUGGESTIONS
-    } else {
-        &[]
+pub fn command_suggestions(input: &str) -> Vec<CommandSuggestion> {
+    let trimmed = input.trim_start();
+    let Some(prefix) = trimmed.strip_prefix('/') else {
+        return Vec::new();
+    };
+    if prefix.contains(char::is_whitespace) {
+        return Vec::new();
     }
+
+    let command_prefix = format!("/{prefix}");
+    COMMAND_SUGGESTIONS
+        .iter()
+        .copied()
+        .filter(|suggestion| suggestion.command.starts_with(&command_prefix))
+        .collect()
 }
 
 #[cfg(test)]
@@ -108,6 +136,18 @@ mod tests {
             parse_input("/theme"),
             ParsedInput::Command(AppCommand::Theme(None))
         );
+        assert_eq!(
+            parse_input("/task todo_reminder"),
+            ParsedInput::Command(AppCommand::Task(Some("todo_reminder".to_owned())))
+        );
+        assert_eq!(
+            parse_input("/task"),
+            ParsedInput::Command(AppCommand::Task(None))
+        );
+        assert_eq!(
+            parse_input("/forget"),
+            ParsedInput::Command(AppCommand::Forget)
+        );
     }
 
     #[test]
@@ -131,6 +171,8 @@ mod tests {
     fn exposes_command_suggestions_only_in_command_mode() {
         assert!(command_suggestions("hello").is_empty());
         assert_eq!(command_suggestions(" /").len(), COMMAND_SUGGESTIONS.len());
+        assert_eq!(command_suggestions("/th")[0].command, "/theme");
+        assert!(command_suggestions("/theme ").is_empty());
         assert!(
             command_suggestions("/")
                 .iter()

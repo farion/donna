@@ -2,10 +2,12 @@ use eframe::egui::Vec2;
 
 pub(super) const AVATAR_MAX_HEIGHT: f32 = 900.0;
 pub(super) const AVATAR_ASPECT_RATIO: f32 = 0.52;
-pub(super) const AVATAR_LAYOUT_SCALE: f32 = 0.5;
+pub(super) const AVATAR_LAYOUT_SCALE: f32 = 1.0;
 pub(super) const CHAT_WIDTH_RATIO: f32 = 0.8;
 pub(super) const HORIZONTAL_GAP: f32 = 20.0;
 pub(super) const CHAT_INNER_MARGIN: f32 = 14.0;
+pub(super) const DEFAULT_WINDOW_SIZE: [f32; 2] = [614.0, 450.0];
+pub(super) const MIN_WINDOW_SIZE: [f32; 2] = [337.0, 240.0];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ShellLayout {

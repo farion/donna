@@ -27,10 +27,10 @@ pub(super) fn resolve_state(signals: AvatarSignals) -> DonnaState {
         DonnaState::Question
     } else if signals.active_attention {
         DonnaState::Attention
-    } else if signals.active_response {
-        DonnaState::Thinking
     } else if signals.hidden {
         DonnaState::Hidden
+    } else if signals.active_response {
+        DonnaState::Thinking
     } else {
         DonnaState::Idle
     }
@@ -47,6 +47,7 @@ pub(super) fn random_idle_frame() -> u8 {
 impl DonnaState {
     pub(super) fn avatar_state(self, idle_frame: u8) -> AvatarState {
         match self {
+            DonnaState::Idle if idle_frame == 0 => AvatarState::Default,
             DonnaState::Idle => AvatarState::Idle(idle_frame),
             DonnaState::Hidden | DonnaState::Attention => AvatarState::Attention,
             DonnaState::Thinking => AvatarState::Thinking,
@@ -70,6 +71,7 @@ impl DonnaState {
 #[cfg(test)]
 mod tests {
     use super::{AvatarSignals, DonnaState, resolve_state};
+    use crate::avatar::AvatarState;
 
     #[test]
     fn command_mode_has_top_priority() {
@@ -85,11 +87,18 @@ mod tests {
     }
 
     #[test]
-    fn question_attention_and_thinking_are_prioritized() {
+    fn idle_uses_default_avatar_until_pulse_frame() {
+        assert_eq!(DonnaState::Idle.avatar_state(0), AvatarState::Default);
+        assert_eq!(DonnaState::Idle.avatar_state(2), AvatarState::Idle(2));
+    }
+
+    #[test]
+    fn question_attention_hidden_and_thinking_are_prioritized() {
         assert_eq!(
             resolve_state(AvatarSignals {
                 active_question: true,
                 active_attention: true,
+                hidden: true,
                 active_response: true,
                 ..AvatarSignals::default()
             }),
@@ -98,10 +107,19 @@ mod tests {
         assert_eq!(
             resolve_state(AvatarSignals {
                 active_attention: true,
+                hidden: true,
                 active_response: true,
                 ..AvatarSignals::default()
             }),
             DonnaState::Attention
+        );
+        assert_eq!(
+            resolve_state(AvatarSignals {
+                hidden: true,
+                active_response: true,
+                ..AvatarSignals::default()
+            }),
+            DonnaState::Hidden
         );
         assert_eq!(
             resolve_state(AvatarSignals {

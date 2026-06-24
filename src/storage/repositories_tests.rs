@@ -25,10 +25,18 @@ fn stores_basic_records_and_state() {
             notes: Some("From meeting follow-up".to_owned()),
             source: "donna_chat".to_owned(),
             related_topic: Some("billing".to_owned()),
+            severity: "middle".to_owned(),
             due_at: Some(2_000),
         })
         .expect("create todo");
     assert_eq!(todo.status, "open");
+    assert_eq!(
+        store
+            .update_todo_severity(todo.id, "high")
+            .expect("raise todo severity")
+            .severity,
+        "high"
+    );
     assert_eq!(
         store
             .update_todo_status(todo.id, "done")

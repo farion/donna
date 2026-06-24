@@ -1,8 +1,74 @@
 use crate::storage::connection::{LocalStore, StorageError, now_seconds};
-use crate::storage::types::{AttentionItem, NewAttentionItem};
-use rusqlite::{Row, params};
+use crate::storage::repositories::todo_from_row;
+use crate::storage::types::{AttentionItem, NewAttentionItem, StoredTodo};
+use rusqlite::{OptionalExtension, Row, params};
 
 impl LocalStore {
+    pub fn create_todo_reminder_attention(
+        &self,
+        at: i64,
+    ) -> Result<Option<AttentionItem>, StorageError> {
+        let Some(todo) = self.todo_for_reminder(at)? else {
+            return Ok(None);
+        };
+
+        self.create_attention_item(&NewAttentionItem {
+            source_type: "todo_reminder".to_owned(),
+            source_id: Some(todo.id),
+            level: todo_reminder_level(&todo.severity).to_owned(),
+            title: "Open todo".to_owned(),
+            body: Some(todo.title),
+            due_at: Some(at),
+            payload: Some(format!(r#"{{"todo_id":{}}}"#, todo.id)),
+        })
+        .map(Some)
+    }
+
+    pub fn todo_for_reminder(&self, at: i64) -> Result<Option<StoredTodo>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT id, title, notes, status, source, related_topic, severity, due_at,
+                    snoozed_until, stale_at, created_at, updated_at, completed_at,
+                    dismissed_at
+                 FROM todos todo
+                 WHERE todo.status = 'open'
+                    AND (todo.snoozed_until IS NULL OR todo.snoozed_until <= ?1)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM attention_items item
+                        WHERE item.source_type = 'todo_reminder'
+                            AND item.source_id = todo.id
+                            AND item.status IN ('open', 'snoozed')
+                    )
+                 ORDER BY
+                    COALESCE(todo.due_at, 9223372036854775807),
+                    CASE todo.severity WHEN 'high' THEN 0 WHEN 'middle' THEN 1 ELSE 2 END,
+                    todo.updated_at ASC
+                 LIMIT 1",
+                [at],
+                todo_from_row,
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn forget_task_reminder_snoozes(&self) -> Result<usize, StorageError> {
+        let now = now_seconds()?;
+        let todos = self.connection.execute(
+            "UPDATE todos
+             SET snoozed_until = NULL, updated_at = ?1
+             WHERE status = 'open' AND snoozed_until IS NOT NULL",
+            [now],
+        )?;
+        let attention_items = self.connection.execute(
+            "UPDATE attention_items
+             SET status = 'open', snoozed_until = NULL, feedback = NULL, updated_at = ?1
+             WHERE source_type = 'todo_reminder' AND status = 'snoozed'",
+            [now],
+        )?;
+
+        Ok(todos + attention_items)
+    }
+
     pub fn create_attention_item(
         &self,
         input: &NewAttentionItem,
@@ -136,6 +202,14 @@ impl LocalStore {
     }
 }
 
+fn todo_reminder_level(severity: &str) -> &'static str {
+    match severity {
+        "high" => "important",
+        "low" => "info",
+        _ => "normal",
+    }
+}
+
 fn attention_item_from_row(row: &Row<'_>) -> rusqlite::Result<AttentionItem> {
     Ok(AttentionItem {
         id: row.get(0)?,
@@ -159,6 +233,7 @@ fn attention_item_from_row(row: &Row<'_>) -> rusqlite::Result<AttentionItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::NewTodo;
 
     #[test]
     fn snooze_dismiss_and_feedback_are_persisted() {
@@ -190,5 +265,146 @@ mod tests {
         assert_eq!(dismissed.feedback.as_deref(), Some("not_important"));
         assert!(dismissed.dismissed_at.is_some());
         assert!(store.ready_attention_items(600).expect("ready").is_empty());
+    }
+
+    #[test]
+    fn todo_reminder_selects_due_then_severe_todo() {
+        let store = LocalStore::in_memory().expect("store");
+        let later = store
+            .create_todo(&NewTodo {
+                title: "later high".to_owned(),
+                notes: None,
+                source: "test".to_owned(),
+                related_topic: None,
+                severity: "high".to_owned(),
+                due_at: Some(2_000),
+            })
+            .expect("later");
+        let earliest = store
+            .create_todo(&NewTodo {
+                title: "earliest low".to_owned(),
+                notes: None,
+                source: "test".to_owned(),
+                related_topic: None,
+                severity: "low".to_owned(),
+                due_at: Some(1_000),
+            })
+            .expect("earliest");
+
+        let item = store
+            .create_todo_reminder_attention(900)
+            .expect("reminder")
+            .expect("item");
+
+        assert_eq!(item.source_type, "todo_reminder");
+        assert_eq!(item.source_id, Some(earliest.id));
+        assert_eq!(item.level, "info");
+        assert_eq!(item.body.as_deref(), Some("earliest low"));
+
+        let duplicate = store
+            .create_todo_reminder_attention(900)
+            .expect("duplicate check")
+            .expect("second item for next todo");
+        assert_eq!(duplicate.source_id, Some(later.id));
+    }
+
+    #[test]
+    fn todo_severity_update_refreshes_open_reminder_level() {
+        let store = LocalStore::in_memory().expect("store");
+        let todo = store
+            .create_todo(&NewTodo {
+                title: "fix the thing".to_owned(),
+                notes: None,
+                source: "test".to_owned(),
+                related_topic: None,
+                severity: "middle".to_owned(),
+                due_at: None,
+            })
+            .expect("todo");
+        let item = store
+            .create_todo_reminder_attention(900)
+            .expect("reminder")
+            .expect("item");
+        assert_eq!(item.level, "normal");
+
+        store
+            .update_todo_severity(todo.id, "high")
+            .expect("update severity");
+
+        assert_eq!(
+            store.attention_item(item.id).expect("updated item").level,
+            "important"
+        );
+    }
+
+    #[test]
+    fn todo_reminder_respects_todo_snooze_until() {
+        let store = LocalStore::in_memory().expect("store");
+        let todo = store
+            .create_todo(&NewTodo {
+                title: "snoozed".to_owned(),
+                notes: None,
+                source: "test".to_owned(),
+                related_topic: None,
+                severity: "high".to_owned(),
+                due_at: None,
+            })
+            .expect("todo");
+        store.snooze_todo_until(todo.id, 2_000).expect("snooze");
+
+        assert!(
+            store
+                .create_todo_reminder_attention(1_999)
+                .expect("early")
+                .is_none()
+        );
+        assert!(
+            store
+                .create_todo_reminder_attention(2_000)
+                .expect("ready")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn forget_task_reminder_snoozes_reopens_task_snoozes() {
+        let store = LocalStore::in_memory().expect("store");
+        let todo = store
+            .create_todo(&NewTodo {
+                title: "ignored".to_owned(),
+                notes: None,
+                source: "test".to_owned(),
+                related_topic: None,
+                severity: "middle".to_owned(),
+                due_at: None,
+            })
+            .expect("todo");
+        store
+            .snooze_todo_until(todo.id, 2_000)
+            .expect("snooze todo");
+        let item = store
+            .create_attention_item(&NewAttentionItem {
+                source_type: "todo_reminder".to_owned(),
+                source_id: Some(todo.id),
+                level: "normal".to_owned(),
+                title: "Open todo".to_owned(),
+                body: Some("ignored".to_owned()),
+                due_at: Some(1_000),
+                payload: None,
+            })
+            .expect("attention");
+        store
+            .snooze_attention_item(item.id, 2_000)
+            .expect("snooze attention");
+
+        let changed = store
+            .forget_task_reminder_snoozes()
+            .expect("forget snoozes");
+
+        assert_eq!(changed, 2);
+        assert_eq!(store.todo(todo.id).expect("todo").snoozed_until, None);
+        let attention = store.attention_item(item.id).expect("attention");
+        assert_eq!(attention.status, "open");
+        assert_eq!(attention.snoozed_until, None);
     }
 }

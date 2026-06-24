@@ -6,6 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+const BUILTIN_TODO_REMINDER_TASK: &str = include_str!("../../assets/tasks/todo_reminder.toml");
+const BUILTIN_TODO_REMINDER_PATH: &str = "<builtin>/todo_reminder.toml";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDefinition {
     pub id: String,
@@ -23,6 +26,7 @@ pub enum TaskKind {
     ShutdownReview,
     CalendarCollision,
     MailFollowUp,
+    TodoReminder,
     Generic(String),
 }
 
@@ -48,8 +52,12 @@ pub fn load_task_directory(
     directory: impl AsRef<Path>,
 ) -> Result<Vec<TaskDefinition>, TaskConfigError> {
     let directory = directory.as_ref();
+    let mut tasks = vec![load_task_toml(
+        PathBuf::from(BUILTIN_TODO_REMINDER_PATH),
+        BUILTIN_TODO_REMINDER_TASK,
+    )?];
     if !directory.exists() {
-        return Ok(Vec::new());
+        return Ok(tasks);
     }
 
     let mut paths = fs::read_dir(directory)
@@ -62,7 +70,10 @@ pub fn load_task_directory(
         .collect::<Vec<_>>();
     paths.sort();
 
-    paths.into_iter().map(load_task_file).collect()
+    for path in paths {
+        tasks.push(load_task_file(path)?);
+    }
+    Ok(tasks)
 }
 
 fn load_task_file(path: PathBuf) -> Result<TaskDefinition, TaskConfigError> {
@@ -70,6 +81,10 @@ fn load_task_file(path: PathBuf) -> Result<TaskDefinition, TaskConfigError> {
         path: path.clone(),
         message: error.to_string(),
     })?;
+    load_task_toml(path, &contents)
+}
+
+fn load_task_toml(path: PathBuf, contents: &str) -> Result<TaskDefinition, TaskConfigError> {
     let raw = toml::from_str::<RawTaskDefinition>(&contents).map_err(|error| {
         TaskConfigError::Decode {
             path: path.clone(),
@@ -125,6 +140,7 @@ impl TaskKind {
             "shutdown_review" => Self::ShutdownReview,
             "calendar_collision" => Self::CalendarCollision,
             "mail_follow_up" => Self::MailFollowUp,
+            "todo_reminder" => Self::TodoReminder,
             other => Self::Generic(other.to_owned()),
         }
     }
@@ -135,6 +151,7 @@ impl TaskKind {
             Self::ShutdownReview => "shutdown_review",
             Self::CalendarCollision => "calendar_collision",
             Self::MailFollowUp => "mail_follow_up",
+            Self::TodoReminder => "todo_reminder",
             Self::Generic(kind) => kind.as_str(),
         }
     }
@@ -193,14 +210,27 @@ model = "openai-compatible"
 
         let tasks = load_task_directory(dir.path()).expect("tasks");
 
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, "daily");
-        assert_eq!(tasks[0].kind, TaskKind::DailyPlanning);
-        assert_eq!(tasks[0].prompt_file, Some(dir.path().join("daily.md")));
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, "todo-reminder");
+        assert_eq!(tasks[0].kind, TaskKind::TodoReminder);
+        assert_eq!(tasks[0].schedule.source(), "*/10 * * * *");
+        assert_eq!(tasks[1].id, "daily");
+        assert_eq!(tasks[1].kind, TaskKind::DailyPlanning);
+        assert_eq!(tasks[1].prompt_file, Some(dir.path().join("daily.md")));
         assert_eq!(
-            tasks[0].model_override.as_deref(),
+            tasks[1].model_override.as_deref(),
             Some("openai-compatible")
         );
+    }
+
+    #[test]
+    fn missing_task_directory_still_loads_builtin_todo_reminder() {
+        let dir = tempfile::tempdir().expect("dir");
+        let tasks = load_task_directory(dir.path().join("missing")).expect("tasks");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "todo-reminder");
+        assert_eq!(tasks[0].kind, TaskKind::TodoReminder);
     }
 
     #[test]

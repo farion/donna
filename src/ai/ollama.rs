@@ -3,6 +3,7 @@ use super::{
 };
 use crate::model::ModelDefinition;
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -21,6 +22,76 @@ impl OllamaProvider {
             messages,
             stream: request.stream,
         }
+    }
+
+    pub fn complete_streaming(
+        &self,
+        model: &ModelDefinition,
+        request: &AiRequest,
+        mut on_delta: impl FnMut(&str),
+    ) -> Result<AiResponse, AiError> {
+        let base_url = model
+            .base_url
+            .as_deref()
+            .ok_or_else(|| AiError::MissingBaseUrl(model.id.clone()))?;
+        let mut request = request.clone();
+        request.stream = true;
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
+            .json(&Self::chat_payload(model, &request))
+            .send()
+            .map_err(|error| AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("failed to send Ollama request: {error}"),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("Ollama returned {status}"),
+            });
+        }
+
+        let mut text = String::new();
+        for line in std::io::BufReader::new(response).lines() {
+            let line = line.map_err(|error| AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("failed to read Ollama stream: {error}"),
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let response = serde_json::from_str::<OllamaChatResponse>(&line).map_err(|error| {
+                AiError::ProviderUnavailable {
+                    provider: self.family(),
+                    detail: format!("failed to decode Ollama stream: {error}"),
+                }
+            })?;
+            if let Some(error) = response.error {
+                return Err(AiError::ProviderUnavailable {
+                    provider: self.family(),
+                    detail: error,
+                });
+            }
+            let delta = response
+                .message
+                .map(|message| message.content)
+                .or(response.response)
+                .unwrap_or_default();
+            if !delta.is_empty() {
+                text.push_str(&delta);
+                on_delta(&delta);
+            }
+            if response.done.unwrap_or(false) {
+                break;
+            }
+        }
+
+        Ok(AiResponse {
+            text,
+            provider: self.family(),
+            model_id: model.id.clone(),
+        })
     }
 }
 
@@ -95,6 +166,7 @@ struct OllamaChatResponse {
     message: Option<WireChatMessage>,
     response: Option<String>,
     error: Option<String>,
+    done: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,5 +340,53 @@ mod tests {
 
         assert_eq!(response.text, "hello");
         assert_eq!(response.provider, ProviderFamily::Ollama);
+    }
+
+    #[test]
+    fn ollama_provider_streams_chat_deltas() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let size = stream.read(&mut buffer).expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..size]);
+            assert!(request.starts_with("POST /api/chat HTTP/1.1"));
+            assert!(request.contains("\"stream\":true"));
+            let body = concat!(
+                r#"{"message":{"role":"assistant","content":"hel"},"done":false}"#,
+                "\n",
+                r#"{"message":{"role":"assistant","content":"lo"},"done":true}"#,
+                "\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let config = AppConfig::default();
+        let registry = ModelRegistry::from_config(&config);
+        let mut model = registry
+            .selected_or_first("ollama-local")
+            .expect("model")
+            .clone();
+        model.base_url = Some(format!("http://{address}"));
+        let provider = OllamaProvider;
+        let request =
+            AiRequest::new("system").with_message(AiMessage::trusted(AiRole::User, "hello?"));
+        let mut deltas = Vec::new();
+
+        let response = provider
+            .complete_streaming(&model, &request, |delta| deltas.push(delta.to_owned()))
+            .expect("response");
+        server.join().expect("server");
+
+        assert_eq!(deltas, ["hel", "lo"]);
+        assert_eq!(response.text, "hello");
     }
 }

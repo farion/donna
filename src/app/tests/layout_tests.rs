@@ -1,13 +1,15 @@
 use super::super::chat_bar::chat_bar_reserved_height;
 use super::super::layout::{
     AVATAR_ASPECT_RATIO, AVATAR_LAYOUT_SCALE, AVATAR_MAX_HEIGHT, CHAT_INNER_MARGIN,
-    CHAT_WIDTH_RATIO, HORIZONTAL_GAP, ShellLayout, avatar_image_size, shell_layout,
+    CHAT_WIDTH_RATIO, DEFAULT_WINDOW_SIZE, HORIZONTAL_GAP, MIN_WINDOW_SIZE, ShellLayout,
+    avatar_image_size, shell_layout,
 };
 use super::super::native_options;
-use super::{app_harness, submit_text};
+use super::{app_harness, app_harness_with_config, submit_text};
+use crate::config::ModelConfig;
 use eframe::App;
 use eframe::egui::{self, Vec2};
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 
 fn shell_width(layout: ShellLayout) -> f32 {
     layout.avatar_width + layout.gap + layout.chat_width
@@ -52,8 +54,25 @@ fn unscaled_avatar_height(available: Vec2) -> f32 {
 fn native_window_is_transparent_and_undecorated() {
     let options = native_options();
 
+    assert_eq!(options.viewport.app_id.as_deref(), Some("donna"));
+    assert_eq!(
+        options.viewport.inner_size,
+        Some(DEFAULT_WINDOW_SIZE.into())
+    );
+    assert_eq!(
+        options.viewport.min_inner_size,
+        Some(MIN_WINDOW_SIZE.into())
+    );
+    assert_eq!(
+        options.viewport.max_inner_size,
+        Some(DEFAULT_WINDOW_SIZE.into())
+    );
+    assert_eq!(options.viewport.fullscreen, Some(false));
+    assert_eq!(options.viewport.maximized, Some(false));
+    assert_eq!(options.viewport.resizable, Some(false));
     assert_eq!(options.viewport.transparent, Some(true));
     assert_eq!(options.viewport.decorations, Some(false));
+    assert_eq!(options.viewport.maximize_button, Some(false));
     assert_eq!(options.viewport.has_shadow, Some(false));
     assert_eq!(options.viewport.title_shown, Some(false));
     assert_eq!(options.viewport.titlebar_shown, Some(false));
@@ -116,9 +135,9 @@ fn narrow_shell_shrinks_without_painting_extra_frames() {
 
 #[test]
 fn compact_chat_bar_reserves_space_inside_minimum_chat_fill() {
-    let layout = shell_layout(Vec2::new(720.0, 480.0));
+    let layout = shell_layout(MIN_WINDOW_SIZE.into());
     let chat_inner_size = chat_inner_size(layout);
-    let reserved_bar_height = chat_bar_reserved_height(chat_inner_size.x);
+    let reserved_bar_height = chat_bar_reserved_height(chat_inner_size.x, "", None);
     let minimum_scroll_height = 24.0;
 
     assert!(
@@ -128,13 +147,16 @@ fn compact_chat_bar_reserves_space_inside_minimum_chat_fill() {
 }
 
 #[test]
-fn minimum_chat_bar_controls_keep_horizontal_widths() {
-    let (_config_dir, mut harness) = app_harness(Vec2::new(720.0, 480.0));
+fn minimum_chat_bar_input_fills_available_width() {
+    let layout = shell_layout(MIN_WINDOW_SIZE.into());
+    let expected_width = chat_inner_size(layout).x;
+    let (_config_dir, mut harness) = app_harness(MIN_WINDOW_SIZE.into());
     harness.run_steps(1);
 
     let status = harness.get_by_label("Idle").rect();
     let model = harness.get_by_label("Ollama local").rect();
-    let send = harness.get_by_label("Send").rect();
+    let input = harness.get_by_role(egui::accesskit::Role::TextInput);
+    let input_rect = input.rect();
 
     assert!(
         status.width() >= 18.0 && status.height() <= 24.0,
@@ -145,24 +167,36 @@ fn minimum_chat_bar_controls_keep_horizontal_widths() {
         "model label should stay horizontal, got {model:?}"
     );
     assert!(
-        send.width() >= 120.0,
-        "compact send button should fill the chat bar width, got {send:?}"
+        input_rect.width() >= expected_width - 1.0,
+        "input should fill the chat bar width {expected_width}, got {input_rect:?}"
+    );
+    assert!(
+        input.accesskit_node().is_focused(),
+        "input should be focused on startup"
     );
 }
 
 #[test]
-fn messages_do_not_expand_half_scale_chat_width() {
+fn messages_do_not_expand_computed_chat_width() {
     let window_size = Vec2::new(820.0, 476.0);
     let layout = shell_layout(window_size);
     let max_message_width = (layout.chat_width - CHAT_INNER_MARGIN * 2.0).max(0.0) * 0.72;
-    let (_config_dir, mut harness) = app_harness(window_size);
+    let (_config_dir, mut harness) = app_harness_with_config(window_size, |config| {
+        config.ai.chat.selected_model = "mock-chat".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-chat".to_owned(),
+            label: "Mock chat".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
 
     submit_text(&mut harness, "hi");
-    harness.run_steps(1);
+    harness.run_steps(8);
 
-    let donna_reply = harness
-        .get_by_label_contains("Ollama local is selected")
-        .rect();
+    let donna_reply = harness.get_by_label_contains("Mock response").rect();
 
     assert!(
         donna_reply.width() <= max_message_width + 1.0,
@@ -183,7 +217,7 @@ fn avatar_image_fit_uses_full_avatar_height_and_preserves_ratio() {
 }
 
 #[test]
-fn wider_avatar_sources_still_fit_inside_half_scale_box() {
+fn wider_avatar_sources_still_fit_inside_avatar_box() {
     let source = Vec2::new(1728.0, 2304.0);
     let bounds = Vec2::new(AVATAR_MAX_HEIGHT * AVATAR_ASPECT_RATIO, AVATAR_MAX_HEIGHT);
     let image_size = avatar_image_size(source, bounds);

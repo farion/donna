@@ -7,7 +7,6 @@ use eframe::egui::{
 #[derive(Debug, Clone, Copy)]
 pub(super) struct UiPalette {
     pub chat_fill: Color32,
-    pub heading_text: Color32,
     pub notice_text: Color32,
     pub warning_text: Color32,
     pub error_text: Color32,
@@ -32,15 +31,32 @@ pub(super) fn apply_style(ctx: &egui::Context, theme: UiThemeMode) {
         style.visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
         style.visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
         style.visuals.widgets.active.corner_radius = CornerRadius::same(6);
+        disable_debug_overlays(style);
     });
     ctx.set_theme(theme_preference(theme));
+}
+
+fn disable_debug_overlays(_style: &mut egui::Style) {
+    #[cfg(debug_assertions)]
+    {
+        _style.debug.debug_on_hover = false;
+        _style.debug.debug_on_hover_with_all_modifiers = false;
+        _style.debug.hover_shows_next = false;
+        _style.debug.show_expand_width = false;
+        _style.debug.show_expand_height = false;
+        _style.debug.show_resize = false;
+        _style.debug.show_interactive_widgets = false;
+        _style.debug.show_widget_hits = false;
+        _style.debug.warn_if_rect_changes_id = false;
+        _style.debug.show_unaligned = false;
+        _style.debug.show_focused_widget = false;
+    }
 }
 
 pub(super) fn palette_for(theme: egui::Theme) -> UiPalette {
     match theme {
         egui::Theme::Light => UiPalette {
             chat_fill: Color32::from_rgb(252, 252, 249),
-            heading_text: Color32::from_rgb(26, 33, 38),
             notice_text: Color32::from_rgb(72, 83, 92),
             warning_text: Color32::from_rgb(148, 75, 45),
             error_text: Color32::from_rgb(154, 56, 48),
@@ -57,7 +73,6 @@ pub(super) fn palette_for(theme: egui::Theme) -> UiPalette {
         },
         egui::Theme::Dark => UiPalette {
             chat_fill: Color32::from_rgb(28, 32, 36),
-            heading_text: Color32::from_rgb(238, 243, 238),
             notice_text: Color32::from_rgb(188, 198, 194),
             warning_text: Color32::from_rgb(239, 170, 111),
             error_text: Color32::from_rgb(250, 139, 130),
@@ -147,6 +162,12 @@ pub(super) fn app_visuals(theme: egui::Theme) -> egui::Visuals {
         egui::Theme::Light => Color32::from_rgb(105, 137, 185),
         egui::Theme::Dark => Color32::from_rgb(88, 121, 173),
     };
+    let quiet_stroke = egui::Stroke::new(0.0, Color32::TRANSPARENT);
+    visuals.widgets.inactive.bg_stroke = quiet_stroke;
+    visuals.widgets.hovered.bg_stroke = quiet_stroke;
+    visuals.widgets.active.bg_stroke = quiet_stroke;
+    visuals.widgets.open.bg_stroke = quiet_stroke;
+    visuals.widgets.noninteractive.bg_stroke = quiet_stroke;
 
     visuals
 }

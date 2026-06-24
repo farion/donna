@@ -1,8 +1,11 @@
-use eframe::egui::{self, ColorImage, TextureHandle};
+use eframe::egui::{self, ColorImage, TextureFilter, TextureHandle, TextureOptions};
 use image::imageops::FilterType;
 use rust_embed::RustEmbed;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+use std::time::Duration;
 
 pub const DEFAULT_CHARACTER: &str = "donna";
 
@@ -23,6 +26,8 @@ struct CharacterAssets;
 #[derive(Default)]
 pub struct AvatarManager {
     textures: HashMap<String, TextureHandle>,
+    pending: HashMap<String, Receiver<Option<ColorImage>>>,
+    last_texture: Option<TextureHandle>,
 }
 
 impl AvatarManager {
@@ -64,16 +69,49 @@ impl AvatarManager {
         let key = format!("{character}:{}", state.file_name());
 
         if let Some(texture) = self.textures.get(&key) {
-            return Some(texture.clone());
+            let texture = texture.clone();
+            self.last_texture = Some(texture.clone());
+            return Some(texture);
         }
 
-        let bytes = Self::asset_bytes(&character, state)?;
         let max_texture_side = ctx.input(|input| input.max_texture_side);
-        let image = decode_png(bytes.as_ref(), max_texture_side)?;
-        let texture = ctx.load_texture(key.clone(), image, egui::TextureOptions::LINEAR);
-        self.textures.insert(key, texture.clone());
-        Some(texture)
+        if let Some(receiver) = self.pending.get(&key) {
+            match receiver.try_recv() {
+                Ok(Some(image)) => {
+                    let texture = ctx.load_texture(key.clone(), image, avatar_texture_options());
+                    self.textures.insert(key.clone(), texture.clone());
+                    self.last_texture = Some(texture.clone());
+                    self.pending.remove(&key);
+                    return Some(texture);
+                }
+                Ok(None) => {
+                    self.pending.remove(&key);
+                    return self.last_texture.clone();
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(16));
+                    return self.last_texture.clone();
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.pending.remove(&key);
+                    return self.last_texture.clone();
+                }
+            }
+        }
+
+        let bytes = Self::asset_bytes(&character, state)?.into_owned();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(decode_png(&bytes, max_texture_side));
+        });
+        self.pending.insert(key, receiver);
+        ctx.request_repaint_after(Duration::from_millis(16));
+        self.last_texture.clone()
     }
+}
+
+fn avatar_texture_options() -> TextureOptions {
+    TextureOptions::LINEAR.with_mipmap_mode(Some(TextureFilter::Linear))
 }
 
 impl AvatarState {
@@ -106,7 +144,10 @@ fn decode_png(bytes: &[u8], max_side: usize) -> Option<ColorImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AvatarManager, AvatarState, DEFAULT_CHARACTER, decode_png};
+    use super::{
+        AvatarManager, AvatarState, DEFAULT_CHARACTER, avatar_texture_options, decode_png,
+    };
+    use eframe::egui::{TextureFilter, TextureOptions};
 
     #[test]
     fn donna_character_is_embedded() {
@@ -130,5 +171,23 @@ mod tests {
 
         assert!(image.width() <= 512);
         assert!(image.height() <= 512);
+    }
+
+    #[test]
+    fn avatar_textures_use_linear_mipmap_filtering() {
+        let options = avatar_texture_options();
+
+        assert_eq!(options.magnification, TextureOptions::LINEAR.magnification);
+        assert_eq!(options.minification, TextureOptions::LINEAR.minification);
+        assert_eq!(options.mipmap_mode, Some(TextureFilter::Linear));
+    }
+
+    #[test]
+    fn avatar_manager_starts_without_text_placeholder_state() {
+        let manager = AvatarManager::new();
+
+        assert!(manager.textures.is_empty());
+        assert!(manager.pending.is_empty());
+        assert!(manager.last_texture.is_none());
     }
 }

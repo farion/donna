@@ -63,6 +63,17 @@ impl TaskRunnerCore {
             })?;
             let prompt = load_task_prompt(task.kind.as_str(), task.prompt_file.as_deref());
 
+            eprintln!(
+                "{}",
+                task_due_log_line(
+                    &task.id,
+                    task.kind.as_str(),
+                    task.schedule.source(),
+                    &selection.model.id,
+                    at,
+                )
+            );
+
             plans.push(TaskRunPlan {
                 task_id: task.id.clone(),
                 kind: task.kind.as_str().to_owned(),
@@ -77,6 +88,19 @@ impl TaskRunnerCore {
 
         Ok(plans)
     }
+}
+
+fn task_due_log_line(
+    task_id: &str,
+    kind: &str,
+    cron: &str,
+    model_id: &str,
+    at: CronDateTime,
+) -> String {
+    format!(
+        "donna task due: id={task_id} kind={kind} cron='{cron}' model={model_id} at={:02}:{:02} dom={} month={} dow={}",
+        at.hour, at.minute, at.day_of_month, at.month, at.day_of_week
+    )
 }
 
 impl TaskRunnerState {
@@ -114,7 +138,7 @@ impl Error for TaskRunnerError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{TaskRunnerCore, TaskRunnerState};
+    use super::{TaskRunnerCore, TaskRunnerState, task_due_log_line};
     use crate::config::AppConfig;
     use crate::model::ModelRegistry;
     use crate::tasks::{CronDateTime, TaskDefinition, TaskKind};
@@ -193,5 +217,28 @@ mod tests {
         state.stop();
 
         assert!(!state.is_running());
+    }
+
+    #[test]
+    fn due_task_log_line_includes_schedule_and_model() {
+        let line = task_due_log_line(
+            "daily",
+            "daily_planning",
+            "0 8 * * *",
+            "ollama-local",
+            CronDateTime {
+                minute: 0,
+                hour: 8,
+                day_of_month: 10,
+                month: 6,
+                day_of_week: 2,
+            },
+        );
+
+        assert!(line.contains("donna task due: id=daily"));
+        assert!(line.contains("kind=daily_planning"));
+        assert!(line.contains("cron='0 8 * * *'"));
+        assert!(line.contains("model=ollama-local"));
+        assert!(line.contains("at=08:00"));
     }
 }

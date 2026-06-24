@@ -47,6 +47,7 @@ impl MemoryExtractor {
 
         if let Some(title) = extract_todo_title(message) {
             extraction.todos.push(NewTodo {
+                severity: classify_todo_severity(&title).to_owned(),
                 title,
                 notes: None,
                 source: CHAT_SOURCE.to_owned(),
@@ -83,6 +84,20 @@ impl MemoryExtractor {
                 0.8,
                 1,
             );
+        }
+
+        if let Some(user_name) = extract_user_name(message) {
+            self.push_memory(
+                &mut extraction,
+                "identity",
+                format!("User name: {user_name}"),
+                0.92,
+                3,
+            );
+        }
+
+        for fact in extract_interesting_facts(message) {
+            self.push_memory(&mut extraction, "fact", format!("Fact: {fact}"), 0.72, 1);
         }
 
         if let Some(fact) = extract_after(message, &["remember that ", "fact: "]) {
@@ -154,6 +169,110 @@ impl MemoryExtractor {
     }
 }
 
+fn extract_user_name(message: &str) -> Option<String> {
+    extract_after(
+        message,
+        &["my name is ", "i am called ", "i'm called ", "call me "],
+    )
+    .map(clean_clause)
+    .map(|name| trim_leading_articles(&name).to_owned())
+    .filter(|name| is_short_fact_value(name))
+}
+
+fn extract_interesting_facts(message: &str) -> Vec<String> {
+    let mut facts = Vec::new();
+    for pattern in [
+        "i live in ",
+        "i work at ",
+        "i work for ",
+        "i work as ",
+        "i like ",
+        "i love ",
+        "i hate ",
+        "my birthday is ",
+        "my timezone is ",
+        "my pronouns are ",
+    ] {
+        if let Some(value) = extract_after(message, &[pattern]) {
+            let value = clean_clause(value);
+            if is_short_fact_value(&value) {
+                facts.push(format!("{}{}", fact_subject(pattern), value));
+            }
+        }
+    }
+
+    facts.extend(extract_my_field_facts(message));
+
+    facts.sort();
+    facts.dedup();
+    facts
+}
+
+fn extract_my_field_facts(message: &str) -> Vec<String> {
+    let mut facts = Vec::new();
+    let mut offset = 0;
+    let lower = message.to_lowercase();
+
+    while let Some(relative_start) = lower[offset..].find("my ") {
+        let start = offset + relative_start + 3;
+        let after_my = &message[start..];
+        let lower_after = after_my.to_lowercase();
+        let Some(separator) = lower_after.find(" is ") else {
+            offset = start;
+            continue;
+        };
+        let field = after_my[..separator].trim();
+        let value = clean_clause(&after_my[separator + 4..]);
+        if !field.is_empty()
+            && !is_sensitive_field(field)
+            && is_short_fact_value(&value)
+            && field.split_whitespace().count() <= 4
+        {
+            facts.push(format!("User {field}: {value}"));
+        }
+        offset = start + separator + 4;
+    }
+
+    facts
+}
+
+fn is_sensitive_field(field: &str) -> bool {
+    let lower = field.to_lowercase();
+    [
+        "password", "secret", "token", "ssn", "medical", "health", "salary",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn fact_subject(pattern: &str) -> &'static str {
+    match pattern {
+        "i live in " => "User lives in: ",
+        "i work at " | "i work for " => "User workplace: ",
+        "i work as " => "User role: ",
+        "i like " => "User likes: ",
+        "i love " => "User loves: ",
+        "i hate " => "User dislikes: ",
+        "my birthday is " => "User birthday: ",
+        "my timezone is " => "User timezone: ",
+        "my pronouns are " => "User pronouns: ",
+        _ => "User fact: ",
+    }
+}
+
+fn trim_leading_articles(value: &str) -> &str {
+    value
+        .strip_prefix("called ")
+        .or_else(|| value.strip_prefix("named "))
+        .unwrap_or(value)
+        .trim()
+}
+
+fn is_short_fact_value(value: &str) -> bool {
+    let words = value.split_whitespace().count();
+    !value.is_empty() && words <= 16 && value.len() <= 120
+}
+
 impl PersistedExtraction {
     pub fn has_records(&self) -> bool {
         !(self.memory_ids.is_empty() && self.todo_ids.is_empty() && self.person_ids.is_empty())
@@ -165,12 +284,48 @@ impl PersistedExtraction {
 }
 
 fn extract_todo_title(message: &str) -> Option<String> {
+    if is_question(message) {
+        return None;
+    }
+
     extract_after(
         message,
         &["todo:", "remember to ", "need to ", "must ", "have to "],
     )
     .map(clean_clause)
     .filter(|title| !title.is_empty())
+}
+
+fn is_question(message: &str) -> bool {
+    let lower = message.trim_start().to_ascii_lowercase();
+    message.trim_end().ends_with('?')
+        || ["what ", "when ", "where ", "why ", "how ", "which ", "who "]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
+
+fn classify_todo_severity(title: &str) -> &'static str {
+    let lower = title.to_ascii_lowercase();
+    if [
+        "urgent",
+        "asap",
+        "critical",
+        "important",
+        "deadline",
+        "overdue",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+    {
+        "high"
+    } else if ["someday", "maybe", "nice to", "optional"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "low"
+    } else {
+        "middle"
+    }
 }
 
 fn extract_meeting_memory(message: &str) -> Option<String> {
@@ -314,6 +469,60 @@ mod tests {
         assert_ne!(
             todo.title,
             "I prefer short updates and need to file receipts"
+        );
+    }
+
+    #[test]
+    fn extracts_user_identity_and_interesting_facts() {
+        let extractor = MemoryExtractor::from_config(&MemoryConfig::default());
+        let extraction = extractor.extract_user_message(
+            "My name is Frieder. I live in Berlin. My favorite editor is Neovim.",
+        );
+
+        assert!(
+            extraction
+                .memories
+                .iter()
+                .any(|memory| memory.content == "User name: Frieder")
+        );
+        assert!(
+            extraction
+                .memories
+                .iter()
+                .any(|memory| memory.content == "Fact: User lives in: Berlin")
+        );
+        assert!(
+            extraction
+                .memories
+                .iter()
+                .any(|memory| memory.content == "Fact: User favorite editor: Neovim")
+        );
+    }
+
+    #[test]
+    fn persisted_identity_survives_reopening_sqlite() {
+        let extractor = MemoryExtractor::from_config(&MemoryConfig::default());
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("donna.sqlite3");
+        {
+            let store = LocalStore::open(&path).expect("store");
+            let extraction = extractor.extract_user_message("My name is Frieder");
+            extractor
+                .persist(
+                    &store,
+                    &extraction,
+                    SensitiveMemoryApproval::RejectSensitive,
+                )
+                .expect("persist");
+        }
+
+        let reopened = LocalStore::open(path).expect("reopen");
+        let memories = reopened.recent_memories(10).expect("memories");
+
+        assert!(
+            memories
+                .iter()
+                .any(|memory| memory.content == "User name: Frieder")
         );
     }
 }

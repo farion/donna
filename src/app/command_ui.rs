@@ -1,33 +1,8 @@
 use super::DonnaApp;
 use super::ui_style::palette_for;
-use crate::command::command_suggestions;
-use eframe::egui::{self, Button, FontId, RichText};
+use eframe::egui::{self, FontId, RichText};
 
 impl DonnaApp {
-    pub(super) fn render_command_suggestions(&mut self, ui: &mut egui::Ui) {
-        let suggestions = command_suggestions(&self.input);
-        if suggestions.is_empty() {
-            return;
-        }
-
-        ui.horizontal_wrapped(|ui| {
-            for suggestion in suggestions {
-                let response = ui
-                    .add_sized([112.0, 28.0], Button::new(suggestion.command))
-                    .on_hover_text(suggestion.summary);
-                if response.clicked() {
-                    self.input = match suggestion.command {
-                        "/changechar" | "/theme" => format!("{} ", suggestion.command),
-                        _ => suggestion.command.to_owned(),
-                    };
-                    self.input_notice = None;
-                    self.input_error = None;
-                }
-            }
-        });
-        ui.add_space(4.0);
-    }
-
     pub(super) fn render_input_feedback(&self, ui: &mut egui::Ui) {
         let palette = palette_for(ui.ctx().theme());
         if let Some(error) = &self.input_error {

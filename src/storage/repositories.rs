@@ -49,6 +49,21 @@ impl LocalStore {
             .map_err(StorageError::from)
     }
 
+    pub fn recent_memories(&self, limit: usize) -> Result<Vec<StoredMemory>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, memory_type, content, source, confidence, importance,
+                created_at, updated_at, expires_at, forgotten_at
+             FROM memories
+             WHERE forgotten_at IS NULL
+             ORDER BY importance DESC, updated_at DESC
+             LIMIT ?1",
+        )?;
+        let memories = statement
+            .query_map([limit.clamp(1, 100) as i64], memory_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(memories)
+    }
+
     pub fn update_memory_content(
         &self,
         id: i64,
@@ -94,13 +109,14 @@ impl LocalStore {
         let now = now_seconds()?;
         self.connection.execute(
             "INSERT INTO todos (
-                title, notes, source, related_topic, due_at, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                title, notes, source, related_topic, severity, due_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &input.title,
                 &input.notes,
                 &input.source,
                 &input.related_topic,
+                normalize_todo_severity(&input.severity),
                 input.due_at,
                 now,
                 now
@@ -121,7 +137,7 @@ impl LocalStore {
     pub fn todo(&self, id: i64) -> Result<StoredTodo, StorageError> {
         self.connection
             .query_row(
-                "SELECT id, title, notes, status, source, related_topic, due_at,
+                "SELECT id, title, notes, status, source, related_topic, severity, due_at,
                     snoozed_until, stale_at, created_at, updated_at, completed_at,
                     dismissed_at
                  FROM todos
@@ -130,6 +146,24 @@ impl LocalStore {
                 todo_from_row,
             )
             .map_err(StorageError::from)
+    }
+
+    pub fn open_todos(&self, limit: usize) -> Result<Vec<StoredTodo>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, notes, status, source, related_topic, severity, due_at,
+                    snoozed_until, stale_at, created_at, updated_at, completed_at,
+                    dismissed_at
+             FROM todos
+             WHERE status = 'open'
+             ORDER BY COALESCE(due_at, 9223372036854775807),
+                CASE severity WHEN 'high' THEN 0 WHEN 'middle' THEN 1 ELSE 2 END,
+                updated_at DESC
+             LIMIT ?1",
+        )?;
+        let todos = statement
+            .query_map([limit.clamp(1, 100) as i64], todo_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(todos)
     }
 
     pub fn update_todo_status(&self, id: i64, status: &str) -> Result<StoredTodo, StorageError> {
@@ -144,6 +178,47 @@ impl LocalStore {
                  dismissed_at = ?4, stale_at = ?5
              WHERE id = ?6",
             params![status, now, completed_at, dismissed_at, stale_at, id],
+        )?;
+
+        self.todo(id)
+    }
+
+    pub fn update_todo_severity(
+        &self,
+        id: i64,
+        severity: &str,
+    ) -> Result<StoredTodo, StorageError> {
+        let now = now_seconds()?;
+        let severity = normalize_todo_severity(severity);
+        self.connection.execute(
+            "UPDATE todos
+             SET severity = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![severity, now, id],
+        )?;
+        self.connection.execute(
+            "UPDATE attention_items
+             SET level = ?1, updated_at = ?2
+             WHERE source_type = 'todo_reminder'
+                AND source_id = ?3
+                AND status IN ('open', 'snoozed')",
+            params![todo_severity_attention_level(severity), now, id],
+        )?;
+
+        self.todo(id)
+    }
+
+    pub fn snooze_todo_until(
+        &self,
+        id: i64,
+        snoozed_until: i64,
+    ) -> Result<StoredTodo, StorageError> {
+        let now = now_seconds()?;
+        self.connection.execute(
+            "UPDATE todos
+             SET snoozed_until = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![snoozed_until, now, id],
         )?;
 
         self.todo(id)
@@ -406,7 +481,7 @@ fn memory_from_row(row: &Row<'_>) -> rusqlite::Result<StoredMemory> {
     })
 }
 
-fn todo_from_row(row: &Row<'_>) -> rusqlite::Result<StoredTodo> {
+pub(super) fn todo_from_row(row: &Row<'_>) -> rusqlite::Result<StoredTodo> {
     Ok(StoredTodo {
         id: row.get(0)?,
         title: row.get(1)?,
@@ -414,14 +489,31 @@ fn todo_from_row(row: &Row<'_>) -> rusqlite::Result<StoredTodo> {
         status: row.get(3)?,
         source: row.get(4)?,
         related_topic: row.get(5)?,
-        due_at: row.get(6)?,
-        snoozed_until: row.get(7)?,
-        stale_at: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        completed_at: row.get(11)?,
-        dismissed_at: row.get(12)?,
+        severity: row.get(6)?,
+        due_at: row.get(7)?,
+        snoozed_until: row.get(8)?,
+        stale_at: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        completed_at: row.get(12)?,
+        dismissed_at: row.get(13)?,
     })
+}
+
+fn normalize_todo_severity(severity: &str) -> &'static str {
+    match severity.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "high" => "high",
+        _ => "middle",
+    }
+}
+
+fn todo_severity_attention_level(severity: &str) -> &'static str {
+    match severity {
+        "high" => "important",
+        "low" => "info",
+        _ => "normal",
+    }
 }
 
 fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {

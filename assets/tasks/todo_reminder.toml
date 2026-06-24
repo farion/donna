@@ -1,0 +1,4 @@
+id = "todo-reminder"
+enabled = true
+kind = "todo_reminder"
+cron = "*/10 * * * *"

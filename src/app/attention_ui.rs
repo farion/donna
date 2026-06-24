@@ -2,7 +2,9 @@ use crate::app::ui_style::palette_for;
 use crate::attention::{AttentionCandidate, AttentionLevel, AttentionPolicy};
 use crate::config::AttentionConfig;
 use crate::storage::{AttentionItem, LocalStore};
-use eframe::egui::{self, Button, CornerRadius, FontId, Frame, Margin, RichText, Vec2};
+use eframe::egui::{
+    self, Button, Color32, CornerRadius, FontId, Frame, Margin, RichText, Stroke, Vec2,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Default)]
@@ -18,6 +20,10 @@ enum AttentionAction {
     Dismiss,
     SnoozeOneHour,
     NotImportant,
+    TodoAlreadyDone,
+    TodoLaterToday,
+    TodoTomorrow,
+    TodoIgnore,
 }
 
 impl AttentionUiState {
@@ -62,12 +68,13 @@ impl AttentionUiState {
             .fill(palette.attention_card_fill)
             .stroke(egui::Stroke::new(1.0, palette.attention_card_stroke))
             .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(12))
+            .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(
-                        RichText::new(item.level.to_uppercase())
+                        RichText::new(attention_label(&item, store))
                             .font(FontId::proportional(11.0))
                             .color(palette.attention_level_text),
                     );
@@ -89,29 +96,33 @@ impl AttentionUiState {
                 }
 
                 ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.add_sized(button_size(), Button::new("Done")).clicked() {
-                        action = Some(AttentionAction::Complete);
-                    }
-                    if ui
-                        .add_sized(button_size(), Button::new("Snooze 1h"))
-                        .clicked()
-                    {
-                        action = Some(AttentionAction::SnoozeOneHour);
-                    }
-                    if ui
-                        .add_sized(button_size(), Button::new("Dismiss"))
-                        .clicked()
-                    {
-                        action = Some(AttentionAction::Dismiss);
-                    }
-                    if ui
-                        .add_sized(button_size(), Button::new("Not important"))
-                        .clicked()
-                    {
-                        action = Some(AttentionAction::NotImportant);
-                    }
-                });
+                if item.source_type == "todo_reminder" {
+                    action = render_todo_reminder_buttons(ui, &palette);
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_sized(button_size(), Button::new("Done")).clicked() {
+                            action = Some(AttentionAction::Complete);
+                        }
+                        if ui
+                            .add_sized(button_size(), Button::new("Snooze 1h"))
+                            .clicked()
+                        {
+                            action = Some(AttentionAction::SnoozeOneHour);
+                        }
+                        if ui
+                            .add_sized(button_size(), Button::new("Dismiss"))
+                            .clicked()
+                        {
+                            action = Some(AttentionAction::Dismiss);
+                        }
+                        if ui
+                            .add_sized(button_size(), Button::new("Not important"))
+                            .clicked()
+                        {
+                            action = Some(AttentionAction::NotImportant);
+                        }
+                    });
+                }
             });
 
         if let Some(action) = action {
@@ -211,6 +222,24 @@ impl AttentionUiState {
             AttentionAction::NotImportant => {
                 store.dismiss_attention_item(id, Some("not_important"))
             }
+            AttentionAction::TodoAlreadyDone => {
+                if let Some(todo_id) = self.active.as_ref().and_then(|item| item.source_id) {
+                    if let Err(error) = store.update_todo_status(todo_id, "done") {
+                        *notice = Some(error.to_string());
+                        return;
+                    }
+                }
+                store.complete_attention_item(id)
+            }
+            AttentionAction::TodoLaterToday => {
+                self.snooze_todo_reminder(id, store, 4 * 3_600, "later_today", notice)
+            }
+            AttentionAction::TodoTomorrow => {
+                self.snooze_todo_reminder(id, store, 24 * 3_600, "tomorrow", notice)
+            }
+            AttentionAction::TodoIgnore => {
+                self.snooze_todo_reminder(id, store, 3 * 24 * 3_600, "ignore", notice)
+            }
         };
 
         match result {
@@ -221,10 +250,148 @@ impl AttentionUiState {
             Err(error) => *notice = Some(error.to_string()),
         }
     }
+
+    fn snooze_todo_reminder(
+        &self,
+        id: i64,
+        store: &LocalStore,
+        seconds: i64,
+        feedback: &str,
+        notice: &mut Option<String>,
+    ) -> Result<AttentionItem, crate::storage::StorageError> {
+        let Some(now) = unix_now_seconds() else {
+            *notice = Some("System clock unavailable; cannot snooze todo reminder.".into());
+            return store.snooze_attention_item(id, 0);
+        };
+        let until = now + seconds;
+        if let Some(todo_id) = self.active.as_ref().and_then(|item| item.source_id) {
+            store.snooze_todo_until(todo_id, until)?;
+        }
+        store.record_attention_feedback(id, feedback)?;
+        store.snooze_attention_item(id, until)
+    }
 }
 
 fn button_size() -> Vec2 {
     Vec2::new(96.0, 30.0)
+}
+
+fn render_todo_reminder_buttons(
+    ui: &mut egui::Ui,
+    palette: &crate::app::ui_style::UiPalette,
+) -> Option<AttentionAction> {
+    let gap = 8.0;
+    let button_width = ((ui.available_width() - gap) / 2.0).max(96.0);
+    let button_size = Vec2::new(button_width, 31.0);
+    let mut action = None;
+
+    ui.spacing_mut().item_spacing = Vec2::new(gap, 7.0);
+    ui.horizontal(|ui| {
+        if todo_button(ui, palette, button_size, "Already done").clicked() {
+            action = Some(AttentionAction::TodoAlreadyDone);
+        }
+        if todo_button(ui, palette, button_size, "Later today").clicked() {
+            action = Some(AttentionAction::TodoLaterToday);
+        }
+    });
+    ui.horizontal(|ui| {
+        if todo_button(ui, palette, button_size, "Tomorrow").clicked() {
+            action = Some(AttentionAction::TodoTomorrow);
+        }
+        if todo_button(ui, palette, button_size, "Ignore").clicked() {
+            action = Some(AttentionAction::TodoIgnore);
+        }
+    });
+
+    action
+}
+
+fn attention_label(item: &AttentionItem, store: Option<&LocalStore>) -> String {
+    if item.source_type == "todo_reminder" {
+        if let Some(severity) = item
+            .source_id
+            .and_then(|id| store.and_then(|store| store.todo(id).ok()))
+            .map(|todo| todo.severity)
+        {
+            return todo_severity_label(&severity).to_owned();
+        }
+
+        return match item.level.as_str() {
+            "important" => "HIGH".to_owned(),
+            "info" => "LOW".to_owned(),
+            _ => "MIDDLE".to_owned(),
+        };
+    }
+
+    item.level.to_uppercase()
+}
+
+fn todo_severity_label(severity: &str) -> &'static str {
+    match severity {
+        "high" => "HIGH",
+        "low" => "LOW",
+        _ => "MIDDLE",
+    }
+}
+
+fn todo_button(
+    ui: &mut egui::Ui,
+    palette: &crate::app::ui_style::UiPalette,
+    size: Vec2,
+    text: &str,
+) -> egui::Response {
+    ui.add_sized(
+        size,
+        Button::new(
+            RichText::new(text)
+                .font(FontId::proportional(13.0))
+                .color(palette.attention_body_text),
+        )
+        .fill(attention_button_fill(ui.ctx().theme()))
+        .stroke(Stroke::new(1.0, palette.attention_card_stroke))
+        .corner_radius(CornerRadius::same(7)),
+    )
+}
+
+fn attention_button_fill(theme: egui::Theme) -> Color32 {
+    match theme {
+        egui::Theme::Light => Color32::from_rgb(250, 240, 214),
+        egui::Theme::Dark => Color32::from_rgb(61, 53, 44),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{NewAttentionItem, NewTodo};
+
+    #[test]
+    fn todo_reminder_label_uses_current_todo_severity() {
+        let store = LocalStore::in_memory().expect("store");
+        let todo = store
+            .create_todo(&NewTodo {
+                title: "fix the thing".to_owned(),
+                notes: None,
+                source: "test".to_owned(),
+                related_topic: None,
+                severity: "high".to_owned(),
+                due_at: None,
+            })
+            .expect("todo");
+        let item = store
+            .create_attention_item(&NewAttentionItem {
+                source_type: "todo_reminder".to_owned(),
+                source_id: Some(todo.id),
+                level: "normal".to_owned(),
+                title: "Open todo".to_owned(),
+                body: Some(todo.title),
+                due_at: None,
+                payload: None,
+            })
+            .expect("item");
+
+        assert_eq!(attention_label(&item, Some(&store)), "HIGH");
+    }
 }
 
 fn unix_now_seconds() -> Option<i64> {

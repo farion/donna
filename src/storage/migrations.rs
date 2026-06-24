@@ -51,6 +51,11 @@ fn migrations() -> &'static [Migration] {
             name: "attention_workflows",
             sql: ATTENTION_WORKFLOWS,
         },
+        Migration {
+            version: 3,
+            name: "todo_reminder_severity",
+            sql: TODO_REMINDER_SEVERITY,
+        },
     ]
 }
 
@@ -272,6 +277,11 @@ CREATE TABLE attention_items (
 );
 "#;
 
+const TODO_REMINDER_SEVERITY: &str = r#"
+ALTER TABLE todos ADD COLUMN severity TEXT NOT NULL DEFAULT 'middle'
+    CHECK (severity IN ('low', 'middle', 'high'));
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::apply_migrations;
@@ -288,7 +298,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count migrations");
-        assert_eq!(version_count, 2);
+        assert_eq!(version_count, 3);
 
         for table in [
             "memories",

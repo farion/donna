@@ -76,6 +76,7 @@ fn visual_preview(size: Vec2, input: Option<&str>, theme: egui::Theme) -> RgbaIm
             height: layout.chat_height,
             state,
             messages: &messages,
+            input,
             theme,
         },
     );
@@ -95,6 +96,7 @@ struct ChatPreview<'a> {
     height: f32,
     state: &'static str,
     messages: &'a [PreviewMessage],
+    input: Option<&'a str>,
     theme: egui::Theme,
 }
 
@@ -102,13 +104,12 @@ struct ChatPreview<'a> {
 enum TextAlign {
     Left,
     Right,
-    Center,
 }
 
 fn preview_messages(input: Option<&str>) -> Vec<PreviewMessage> {
     let mut messages = vec![PreviewMessage {
         speaker: Speaker::Donna,
-        text: "Donna is running in local shell mode. Chat stays in memory for this session.",
+        text: "Donna is warmed up, dangerous in heels, and ready to make your day behave.",
     }];
 
     match input {
@@ -170,8 +171,8 @@ fn draw_chat(image: &mut RgbaImage, font: &FontArc, preview: ChatPreview<'_>) {
     let inner_x = preview.x + 14.0;
     let inner_y = preview.y + 14.0;
     let inner_width = (preview.width - 28.0).max(0.0);
-    let bar_height = chat_bar_reserved_height(inner_width);
-    let compact = bar_height > 88.0;
+    let bar_height = chat_bar_reserved_height(inner_width, preview.input.unwrap_or_default(), None);
+    let compact = inner_width < 180.0;
     let bar_y = preview.y + outer_height - bar_height;
     fill_rect(
         image,
@@ -267,11 +268,7 @@ fn draw_chat(image: &mut RgbaImage, font: &FontArc, preview: ChatPreview<'_>) {
     }
 
     let input_y = if compact { bar_y + 48.0 } else { bar_y + 34.0 };
-    let input_width = if compact {
-        inner_width
-    } else {
-        (inner_width - 74.0).max(96.0)
-    };
+    let input_width = inner_width;
     let input_fill = visuals
         .text_edit_bg_color
         .unwrap_or(visuals.extreme_bg_color);
@@ -288,41 +285,10 @@ fn draw_chat(image: &mut RgbaImage, font: &FontArc, preview: ChatPreview<'_>) {
         image,
         font,
         if compact { "Message" } else { "Message Donna" },
-        inner_x + 10.0,
-        input_y + 9.0,
+        inner_x + 12.0,
+        input_y + 8.0,
         14.0,
         rgba(palette.notice_text),
-    );
-
-    let (send_x, send_y, send_width) = if compact {
-        (inner_x, input_y + 40.0, inner_width)
-    } else {
-        (inner_x + inner_width - 64.0, input_y, 64.0)
-    };
-    fill_rect(
-        image,
-        send_x,
-        send_y,
-        send_width,
-        34.0,
-        rgba(visuals.widgets.inactive.bg_fill),
-    );
-    stroke_rect(
-        image,
-        send_x,
-        send_y,
-        send_width,
-        34.0,
-        rgba(visuals.widgets.inactive.bg_stroke.color),
-    );
-    draw_text_aligned(
-        image,
-        font,
-        "Send",
-        Vec2::new(send_x + send_width / 2.0, send_y + 9.0),
-        14.0,
-        rgba(palette.heading_text),
-        TextAlign::Center,
     );
 }
 
@@ -411,7 +377,6 @@ fn draw_text_aligned(
     let mut caret = match align {
         TextAlign::Left => position.x,
         TextAlign::Right => position.x - text_width(font, text, size),
-        TextAlign::Center => position.x - text_width(font, text, size) / 2.0,
     };
     let baseline = position.y + scaled.ascent();
     let mut previous: Option<GlyphId> = None;

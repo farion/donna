@@ -28,6 +28,7 @@ pub struct NewTodo {
     pub notes: Option<String>,
     pub source: String,
     pub related_topic: Option<String>,
+    pub severity: String,
     pub due_at: Option<i64>,
 }
 
@@ -39,6 +40,7 @@ pub struct StoredTodo {
     pub status: String,
     pub source: String,
     pub related_topic: Option<String>,
+    pub severity: String,
     pub due_at: Option<i64>,
     pub snoozed_until: Option<i64>,
     pub stale_at: Option<i64>,

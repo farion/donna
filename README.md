@@ -3,6 +3,12 @@
 Donna is a single-user, local-first personal work-life assistant built with Rust
 and egui.
 
+## User Guide
+
+See [`docs/usage.md`](docs/usage.md) for MVP setup, configuration, Microsoft
+Graph auth, privacy boundaries, task files, Obsidian notes behavior, approval
+gates, and troubleshooting.
+
 ## Local Verification
 
 Install Rust through `rustup`; this repository uses the checked-in

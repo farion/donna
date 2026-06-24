@@ -7,6 +7,7 @@ use super::super::native_options;
 use super::app_harness;
 use eframe::App;
 use eframe::egui::{self, Vec2};
+use egui_kittest::kittest::Queryable;
 
 fn shell_width(layout: ShellLayout) -> f32 {
     layout.avatar_width + layout.gap + layout.chat_width
@@ -123,6 +124,29 @@ fn compact_chat_bar_reserves_space_inside_minimum_chat_fill() {
     assert!(
         reserved_bar_height + minimum_scroll_height <= chat_inner_size.y + 0.5,
         "expected chat bar and scroll area to fit at native minimum; inner chat {chat_inner_size:?}, reserved {reserved_bar_height}"
+    );
+}
+
+#[test]
+fn minimum_chat_bar_controls_keep_horizontal_widths() {
+    let (_config_dir, mut harness) = app_harness(Vec2::new(720.0, 480.0));
+    harness.run_steps(1);
+
+    let status = harness.get_by_label("Idle").rect();
+    let model = harness.get_by_label("Ollama local").rect();
+    let send = harness.get_by_label("Send").rect();
+
+    assert!(
+        status.width() >= 18.0 && status.height() <= 24.0,
+        "status label should stay horizontal, got {status:?}"
+    );
+    assert!(
+        model.width() >= 64.0 && model.height() <= 24.0,
+        "model label should stay horizontal, got {model:?}"
+    );
+    assert!(
+        send.width() >= 120.0,
+        "compact send button should fill the chat bar width, got {send:?}"
     );
 }
 

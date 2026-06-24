@@ -7,7 +7,8 @@ use crate::model::ModelRegistry;
 use crate::storage::LocalStore;
 use crate::tasks::TaskRunnerState;
 use eframe::egui::{
-    self, Color32, CornerRadius, FontId, Frame, Key, Margin, RichText, ScrollArea, Vec2,
+    self, Align, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin, RichText, ScrollArea,
+    Vec2,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -378,56 +379,70 @@ impl DonnaApp {
             (size.x - margin * 2.0).max(0.0),
             (size.y - margin * 2.0).max(0.0),
         );
-        Frame::NONE
-            .fill(palette.chat_fill)
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(CHAT_INNER_MARGIN as i8))
-            .show(ui, |ui| {
-                ui.set_min_size(inner_size);
-                ui.set_max_size(inner_size);
 
-                let input_height = chat_bar_reserved_height(inner_size.x);
-                ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .max_height((inner_size.y - input_height).max(24.0))
-                    .show(ui, |ui| {
-                        self.attention
-                            .render(ui, self.store.as_ref(), &mut self.config_notice);
-                        if self.attention.has_active_item() {
-                            ui.add_space(8.0);
-                        }
+        ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+            ui.set_width(size.x);
+            ui.set_height(size.y);
 
-                        for message in self.chat.messages() {
-                            render_message(
+            Frame::NONE
+                .fill(palette.chat_fill)
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::same(CHAT_INNER_MARGIN as i8))
+                .show(ui, |ui| {
+                    ui.set_width(inner_size.x);
+                    ui.set_height(inner_size.y);
+
+                    let input_height = chat_bar_reserved_height(inner_size.x);
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .max_height((inner_size.y - input_height).max(24.0))
+                        .show(ui, |ui| {
+                            ui.set_width(inner_size.x);
+                            self.attention
+                                .render(ui, self.store.as_ref(), &mut self.config_notice);
+                            if self.attention.has_active_item() {
+                                ui.add_space(8.0);
+                            }
+
+                            for message in self.chat.messages() {
+                                render_message(
+                                    ui,
+                                    message.speaker,
+                                    &message.text,
+                                    inner_size.x,
+                                    &self.config,
+                                );
+                                ui.add_space(8.0);
+                            }
+
+                            if let Some(notice) = &self.config_notice {
+                                ui.label(
+                                    RichText::new(notice)
+                                        .font(FontId::proportional(12.0))
+                                        .color(palette.warning_text),
+                                );
+                            }
+
+                            self.sensitive_memory_reviews.render(
                                 ui,
-                                message.speaker,
-                                &message.text,
+                                self.store.as_ref(),
+                                &mut self.config_notice,
                                 inner_size.x,
-                                &self.config,
                             );
-                            ui.add_space(8.0);
-                        }
+                        });
 
-                        if let Some(notice) = &self.config_notice {
-                            ui.label(
-                                RichText::new(notice)
-                                    .font(FontId::proportional(12.0))
-                                    .color(palette.warning_text),
-                            );
-                        }
-
-                        self.sensitive_memory_reviews.render(
-                            ui,
-                            self.store.as_ref(),
-                            &mut self.config_notice,
-                            inner_size.x,
-                        );
-                    });
-
-                ui.separator();
-                self.render_chat_bar(ui, ctx);
-            });
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(inner_size.x, input_height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(inner_size.x);
+                            self.render_chat_bar(ui, ctx);
+                        },
+                    );
+                });
+        });
     }
 }
 

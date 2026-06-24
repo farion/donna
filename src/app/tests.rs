@@ -5,77 +5,6 @@ use eframe::egui::{self, Vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 
-fn shell_width(layout: ShellLayout) -> f32 {
-    layout.avatar_side + layout.chat_width + layout.gap + SHELL_FRAME_MARGIN
-}
-
-fn assert_fits(actual: f32, available: f32) {
-    assert!(
-        actual <= available + 0.5,
-        "expected {actual} to fit within {available}"
-    );
-}
-
-fn assert_close(actual: f32, expected: f32) {
-    assert!(
-        (actual - expected).abs() <= 0.5,
-        "expected {actual} to be close to {expected}"
-    );
-}
-
-#[test]
-fn roomy_shell_preserves_default_chat_ratio() {
-    let available = Vec2::new(960.0, 640.0);
-    let layout = shell_layout(available);
-
-    assert!(!layout.stacked);
-    assert_close(layout.avatar_side, AVATAR_MAX_SIDE);
-    assert_close(layout.chat_width, AVATAR_MAX_SIDE * CHAT_WIDTH_RATIO);
-    assert_fits(shell_width(layout), available.x);
-}
-
-#[test]
-fn minimum_shell_shrinks_row_before_overflowing() {
-    let available = Vec2::new(720.0, 480.0);
-    let layout = shell_layout(available);
-
-    assert!(!layout.stacked);
-    assert!(layout.avatar_side < available.y);
-    assert!(layout.chat_width >= CHAT_MIN_WIDTH);
-    assert_close(layout.chat_width, layout.avatar_side * CHAT_WIDTH_RATIO);
-    assert_fits(shell_width(layout), available.x);
-}
-
-#[test]
-fn narrow_shell_uses_single_column_before_chat_gets_too_small() {
-    let available = Vec2::new(560.0, 480.0);
-    let layout = shell_layout(available);
-
-    assert!(layout.stacked);
-    assert_fits(layout.chat_width + CHAT_FRAME_MARGIN, available.x);
-}
-
-#[test]
-fn avatar_image_fit_is_half_scale_and_preserves_ratio() {
-    let source = Vec2::new(1141.0, 2183.0);
-    let image_size = avatar_image_size(source, AVATAR_MAX_SIDE);
-
-    assert_close(image_size.y, AVATAR_MAX_SIDE * AVATAR_IMAGE_SCALE);
-    assert_close(image_size.x / image_size.y, source.x / source.y);
-    assert!(image_size.x < image_size.y);
-}
-
-#[test]
-fn wider_avatar_sources_still_fit_inside_half_scale_box() {
-    let source = Vec2::new(1728.0, 2304.0);
-    let image_size = avatar_image_size(source, AVATAR_MAX_SIDE);
-    let max_side = AVATAR_MAX_SIDE * AVATAR_IMAGE_SCALE;
-
-    assert!(image_size.x <= max_side + 0.5);
-    assert!(image_size.y <= max_side + 0.5);
-    assert_close(image_size.x / image_size.y, source.x / source.y);
-}
-
 #[test]
 fn hide_command_requests_window_minimize() {
     let (_config_dir, mut harness) = app_harness(Vec2::new(720.0, 480.0));
@@ -451,4 +380,5 @@ fn app_harness_with_config(
     (config_dir, harness)
 }
 
+mod layout_tests;
 mod visual_evidence;

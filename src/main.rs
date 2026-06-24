@@ -1,8 +1,7 @@
-use donna::app::DonnaApp;
+use donna::app::{DonnaApp, native_options};
 use donna::config::AppConfig;
 use donna::microsoft::auth::run_auth_wizard;
 use donna::secrets::KeyringSecretStore;
-use eframe::egui;
 
 fn main() -> eframe::Result<()> {
     if std::env::args().skip(1).any(|arg| arg == "--auth") {
@@ -15,17 +14,9 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Donna")
-            .with_inner_size([960.0, 640.0])
-            .with_min_inner_size([720.0, 480.0]),
-        ..Default::default()
-    };
-
     eframe::run_native(
         "Donna",
-        options,
+        native_options(),
         Box::new(|creation| Ok(Box::new(DonnaApp::new(creation)))),
     )
 }

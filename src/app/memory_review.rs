@@ -1,5 +1,6 @@
 #[cfg(test)]
 use super::DonnaApp;
+use super::ui_style::palette_for;
 use crate::storage::{LocalStore, NewMemory, StoredMemory};
 use eframe::egui::{
     self, Button, Color32, CornerRadius, FontId, Frame, Margin, RichText, TextEdit,
@@ -70,7 +71,7 @@ impl SensitiveMemoryReviews {
         ui.label(
             RichText::new("Sensitive memory review")
                 .font(FontId::proportional(13.0))
-                .color(Color32::from_rgb(78, 64, 54)),
+                .color(palette_for(ui.ctx().theme()).review_heading_text),
         );
 
         let mut action = None;
@@ -313,42 +314,48 @@ fn render_pending_memory(
     action: &mut Option<ReviewAction>,
 ) {
     ui.push_id(("pending_sensitive_memory", pending.id), |ui| {
-        review_frame(ui, |ui| {
-            ui.label(
-                RichText::new("Pending approval")
-                    .font(FontId::proportional(12.0))
-                    .color(Color32::from_rgb(117, 81, 55)),
-            );
-            ui.label(
-                RichText::new(format!("Type: {}", pending.draft.memory_type))
-                    .font(FontId::proportional(12.0))
-                    .color(Color32::from_rgb(89, 96, 103)),
-            );
-            let edit_width = (chat_width - 52.0).max(180.0);
-            ui.add_sized(
-                [edit_width, 58.0],
-                TextEdit::multiline(&mut pending.draft.content)
-                    .desired_rows(2)
-                    .desired_width(edit_width),
-            );
-            ui.horizontal(|ui| {
-                let can_save = !pending.draft.content.trim().is_empty();
-                if ui
-                    .add_enabled(can_save, Button::new("Save"))
-                    .on_hover_text("Approve and save this structured memory")
-                    .clicked()
-                {
-                    *action = Some(ReviewAction::SavePending(pending.id));
-                }
-                if ui
-                    .button("Delete")
-                    .on_hover_text("Discard this pending memory without saving")
-                    .clicked()
-                {
-                    *action = Some(ReviewAction::DeletePending(pending.id));
-                }
-            });
-        });
+        let palette = palette_for(ui.ctx().theme());
+        review_frame(
+            ui,
+            palette.review_card_fill,
+            palette.review_card_stroke,
+            |ui| {
+                ui.label(
+                    RichText::new("Pending approval")
+                        .font(FontId::proportional(12.0))
+                        .color(palette.review_label_text),
+                );
+                ui.label(
+                    RichText::new(format!("Type: {}", pending.draft.memory_type))
+                        .font(FontId::proportional(12.0))
+                        .color(palette.review_metadata_text),
+                );
+                let edit_width = (chat_width - 52.0).max(180.0);
+                ui.add_sized(
+                    [edit_width, 58.0],
+                    TextEdit::multiline(&mut pending.draft.content)
+                        .desired_rows(2)
+                        .desired_width(edit_width),
+                );
+                ui.horizontal(|ui| {
+                    let can_save = !pending.draft.content.trim().is_empty();
+                    if ui
+                        .add_enabled(can_save, Button::new("Save"))
+                        .on_hover_text("Approve and save this structured memory")
+                        .clicked()
+                    {
+                        *action = Some(ReviewAction::SavePending(pending.id));
+                    }
+                    if ui
+                        .button("Delete")
+                        .on_hover_text("Discard this pending memory without saving")
+                        .clicked()
+                    {
+                        *action = Some(ReviewAction::DeletePending(pending.id));
+                    }
+                });
+            },
+        );
     });
 }
 
@@ -359,53 +366,61 @@ fn render_stored_memory(
     action: &mut Option<ReviewAction>,
 ) {
     ui.push_id(("stored_sensitive_memory", stored.memory_id), |ui| {
-        review_frame(ui, |ui| {
-            let status = if stored.forgotten {
-                "Forgotten"
-            } else {
-                "Saved"
-            };
-            ui.label(
-                RichText::new(format!("{status} memory #{}", stored.memory_id))
-                    .font(FontId::proportional(12.0))
-                    .color(Color32::from_rgb(117, 81, 55)),
-            );
-
-            let edit_width = (chat_width - 52.0).max(180.0);
-            ui.add_enabled_ui(!stored.forgotten, |ui| {
-                ui.add_sized(
-                    [edit_width, 58.0],
-                    TextEdit::multiline(&mut stored.content)
-                        .desired_rows(2)
-                        .desired_width(edit_width),
+        let palette = palette_for(ui.ctx().theme());
+        review_frame(
+            ui,
+            palette.review_card_fill,
+            palette.review_card_stroke,
+            |ui| {
+                let status = if stored.forgotten {
+                    "Forgotten"
+                } else {
+                    "Saved"
+                };
+                ui.label(
+                    RichText::new(format!("{status} memory #{}", stored.memory_id))
+                        .font(FontId::proportional(12.0))
+                        .color(palette.review_label_text),
                 );
-            });
 
-            ui.horizontal(|ui| {
-                let can_update = !stored.forgotten && !stored.content.trim().is_empty();
-                if ui
-                    .add_enabled(can_update, Button::new("Update"))
-                    .on_hover_text("Save the corrected memory text")
-                    .clicked()
-                {
-                    *action = Some(ReviewAction::UpdateStored(stored.memory_id));
-                }
-                if ui
-                    .add_enabled(!stored.forgotten, Button::new("Forget"))
-                    .on_hover_text("Mark this memory forgotten and remove it from search")
-                    .clicked()
-                {
-                    *action = Some(ReviewAction::ForgetStored(stored.memory_id));
-                }
-            });
-        });
+                let edit_width = (chat_width - 52.0).max(180.0);
+                let editor = TextEdit::multiline(&mut stored.content)
+                    .desired_rows(2)
+                    .desired_width(edit_width)
+                    .interactive(!stored.forgotten);
+                ui.add_sized([edit_width, 58.0], editor);
+
+                ui.horizontal(|ui| {
+                    let can_update = !stored.forgotten && !stored.content.trim().is_empty();
+                    if ui
+                        .add_enabled(can_update, Button::new("Update"))
+                        .on_hover_text("Save the corrected memory text")
+                        .clicked()
+                    {
+                        *action = Some(ReviewAction::UpdateStored(stored.memory_id));
+                    }
+                    if ui
+                        .add_enabled(!stored.forgotten, Button::new("Forget"))
+                        .on_hover_text("Mark this memory forgotten and remove it from search")
+                        .clicked()
+                    {
+                        *action = Some(ReviewAction::ForgetStored(stored.memory_id));
+                    }
+                });
+            },
+        );
     });
 }
 
-fn review_frame(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+fn review_frame(
+    ui: &mut egui::Ui,
+    fill: Color32,
+    stroke: Color32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
     Frame::NONE
-        .fill(Color32::from_rgb(250, 245, 238))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(223, 207, 189)))
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::same(10))
         .show(ui, |ui| {

@@ -7,13 +7,13 @@ use crate::model::ModelRegistry;
 use crate::storage::LocalStore;
 use crate::tasks::TaskRunnerState;
 use eframe::egui::{
-    self, Align, Button, CentralPanel, Color32, CornerRadius, FontId, Frame, Key, Layout, Margin,
-    RichText, ScrollArea, TextEdit, Vec2,
+    self, Color32, CornerRadius, FontId, Frame, Key, Margin, RichText, ScrollArea, Vec2,
 };
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod attention_ui;
+mod chat_bar;
 mod command_ui;
 mod layout;
 mod memory_review;
@@ -23,15 +23,10 @@ mod theme;
 mod ui_style;
 
 use attention_ui::AttentionUiState;
-use layout::{avatar_image_size, shell_layout};
+use chat_bar::chat_bar_reserved_height;
+use layout::{CHAT_INNER_MARGIN, avatar_image_size, shell_layout};
 use state::{AvatarSignals, DonnaState, random_idle_frame, resolve_state};
 use ui_style::{apply_style, palette_for, render_message};
-
-#[cfg(test)]
-use layout::{
-    AVATAR_FRAME_MARGIN, AVATAR_IMAGE_SCALE, AVATAR_MAX_SIDE, CHAT_FRAME_MARGIN, CHAT_MIN_WIDTH,
-    CHAT_WIDTH_RATIO, SHELL_FRAME_MARGIN, ShellLayout,
-};
 
 pub struct DonnaApp {
     config_path: PathBuf,
@@ -55,6 +50,24 @@ pub struct DonnaApp {
     attention: AttentionUiState,
     idle_frame: u8,
     last_idle_change: Instant,
+}
+
+pub fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Donna")
+            .with_inner_size([1220.0, 960.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_has_shadow(false)
+            .with_fullsize_content_view(true)
+            .with_title_shown(false)
+            .with_titlebar_buttons_shown(false)
+            .with_titlebar_shown(false)
+            .with_movable_by_background(true),
+        ..Default::default()
+    }
 }
 
 impl DonnaApp {
@@ -306,106 +319,78 @@ impl eframe::App for DonnaApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let palette = palette_for(ctx.theme());
-        CentralPanel::default()
-            .frame(Frame::NONE.fill(palette.shell_fill))
-            .show_inside(ui, |ui| {
-                ui.add_space(14.0);
-                ui.horizontal_centered(|ui| {
-                    ui.heading(
-                        RichText::new("Donna")
-                            .font(FontId::proportional(24.0))
-                            .color(palette.heading_text),
-                    );
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new("local-first assistant shell")
-                            .font(FontId::proportional(14.0))
-                            .color(palette.muted_text),
-                    );
-                });
-                ui.add_space(16.0);
+        let available = ui.available_size();
+        let layout = shell_layout(available);
+        let content_width = layout.avatar_width + layout.gap + layout.chat_width;
+        let content_height = layout.avatar_height.max(layout.chat_height);
+        let left_space = ((available.x - content_width) / 2.0).max(0.0);
+        let top_space = ((available.y - content_height) / 2.0).max(0.0);
 
-                let layout = shell_layout(ui.available_size());
-                if layout.stacked {
-                    ui.vertical_centered(|ui| {
-                        self.render_avatar(ui, Vec2::splat(layout.avatar_side));
-                        ui.add_space(layout.gap);
-                        self.render_chat(
-                            ui,
-                            Vec2::new(layout.chat_width, layout.chat_height),
-                            &ctx,
-                        );
-                    });
-                } else {
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        self.render_avatar(ui, Vec2::splat(layout.avatar_side));
-                        ui.add_space(layout.gap);
-                        self.render_chat(
-                            ui,
-                            Vec2::new(layout.chat_width, layout.chat_height),
-                            &ctx,
-                        );
-                    });
-                }
-            });
+        ui.add_space(top_space);
+        ui.horizontal(|ui| {
+            ui.add_space(left_space);
+            self.render_avatar(ui, Vec2::new(layout.avatar_width, layout.avatar_height));
+            ui.add_space(layout.gap);
+            self.render_chat(ui, Vec2::new(layout.chat_width, layout.chat_height), &ctx);
+        });
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        Color32::TRANSPARENT.to_normalized_gamma_f32()
     }
 }
 
 impl DonnaApp {
     fn render_avatar(&mut self, ui: &mut egui::Ui, size: Vec2) {
         let palette = palette_for(ui.ctx().theme());
-        Frame::NONE
-            .fill(palette.avatar_fill)
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(16))
-            .show(ui, |ui| {
-                ui.set_min_size(size);
-                ui.set_max_size(size);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let character = self.config.avatar.character.as_str();
 
-                let character = self.config.avatar.character.as_str();
-                if let Some(texture) =
-                    self.avatar_manager
-                        .texture_for(ui.ctx(), character, self.avatar_state())
-                {
-                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                    let image_size = avatar_image_size(texture.size_vec2(), size.x.min(size.y));
-                    if image_size.x > 0.0 && image_size.y > 0.0 {
-                        let image_rect = egui::Rect::from_center_size(rect.center(), image_size);
-                        ui.painter().image(
-                            texture.id(),
-                            image_rect,
-                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
-                    }
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            RichText::new("Donna")
-                                .font(FontId::proportional(28.0))
-                                .color(palette.heading_text),
-                        );
-                    });
-                }
-            });
+        if let Some(texture) =
+            self.avatar_manager
+                .texture_for(ui.ctx(), character, self.avatar_state())
+        {
+            let image_size = avatar_image_size(texture.size_vec2(), size);
+            if image_size.x > 0.0 && image_size.y > 0.0 {
+                let image_rect = egui::Rect::from_center_size(rect.center(), image_size);
+                ui.painter().image(
+                    texture.id(),
+                    image_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        } else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Donna",
+                FontId::proportional(28.0),
+                palette.heading_text,
+            );
+        }
     }
 
     fn render_chat(&mut self, ui: &mut egui::Ui, size: Vec2, ctx: &egui::Context) {
         let palette = palette_for(ui.ctx().theme());
+        let margin = CHAT_INNER_MARGIN;
+        let inner_size = Vec2::new(
+            (size.x - margin * 2.0).max(0.0),
+            (size.y - margin * 2.0).max(0.0),
+        );
         Frame::NONE
             .fill(palette.chat_fill)
             .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(14))
+            .inner_margin(Margin::same(CHAT_INNER_MARGIN as i8))
             .show(ui, |ui| {
-                ui.set_min_size(size);
-                ui.set_max_size(size);
+                ui.set_min_size(inner_size);
+                ui.set_max_size(inner_size);
 
-                let input_height = 88.0;
+                let input_height = chat_bar_reserved_height(inner_size.x);
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
-                    .max_height((size.y - input_height).max(120.0))
+                    .max_height((inner_size.y - input_height).max(24.0))
                     .show(ui, |ui| {
                         self.attention
                             .render(ui, self.store.as_ref(), &mut self.config_notice);
@@ -418,7 +403,7 @@ impl DonnaApp {
                                 ui,
                                 message.speaker,
                                 &message.text,
-                                size.x,
+                                inner_size.x,
                                 &self.config,
                             );
                             ui.add_space(8.0);
@@ -436,61 +421,13 @@ impl DonnaApp {
                             ui,
                             self.store.as_ref(),
                             &mut self.config_notice,
-                            size.x,
+                            inner_size.x,
                         );
                     });
 
                 ui.separator();
                 self.render_chat_bar(ui, ctx);
             });
-    }
-
-    fn render_chat_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let palette = palette_for(ui.ctx().theme());
-        ui.horizontal(|ui| {
-            let status_label = status::status_label(
-                self.state_label(),
-                self.store.as_ref(),
-                self.config.offline.show_stale_data_warnings,
-            );
-            ui.label(
-                RichText::new(status_label)
-                    .font(FontId::proportional(13.0))
-                    .color(palette.notice_text),
-            );
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(
-                    RichText::new(self.models.selected_label(&self.selected_model_id))
-                        .font(FontId::proportional(13.0))
-                        .color(palette.notice_text),
-                );
-            });
-        });
-
-        ui.add_space(6.0);
-        self.render_command_suggestions(ui);
-        ui.horizontal(|ui| {
-            let send_width = 64.0;
-            let control_gap = ui.spacing().item_spacing.x;
-            let available_width = (ui.available_width() - send_width - control_gap).max(96.0);
-            let response = ui.add_sized(
-                [available_width, 34.0],
-                TextEdit::singleline(&mut self.input)
-                    .hint_text("Message Donna")
-                    .desired_width(available_width),
-            );
-
-            let enter_pressed = response.lost_focus()
-                && ui.input(|input| input.key_pressed(Key::Enter) && !input.modifiers.shift);
-            let send_clicked = ui.add_sized([64.0, 34.0], Button::new("Send")).clicked();
-
-            if enter_pressed || send_clicked {
-                self.submit_input(ctx);
-            }
-        });
-
-        self.render_input_feedback(ui);
     }
 }
 

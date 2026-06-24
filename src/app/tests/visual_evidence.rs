@@ -1,11 +1,14 @@
+use super::super::chat_bar::chat_bar_reserved_height;
+use super::super::ui_style::{
+    app_visuals, default_message_color, palette_for, readable_text_color,
+};
 use super::super::*;
-use super::shell_width;
 use crate::avatar::{AvatarManager, AvatarState, DEFAULT_CHARACTER};
 use crate::chat::Speaker;
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
-use eframe::egui::Vec2;
+use eframe::egui::{self, Color32, Vec2};
 use image::{Rgba, RgbaImage, imageops::FilterType};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[test]
 #[ignore = "writes Paperclip UX review PNG evidence"]
@@ -15,67 +18,35 @@ fn write_visual_evidence_previews() {
         .unwrap_or_else(|| PathBuf::from("target/donna-ux-evidence"));
     std::fs::create_dir_all(&output_dir).expect("create visual evidence dir");
 
-    write_visual_preview(
-        &output_dir,
-        "desktop-default-960x640",
-        Vec2::new(960.0, 640.0),
-        None,
-    );
-    write_visual_preview(
-        &output_dir,
-        "minimum-default-720x480",
-        Vec2::new(720.0, 480.0),
-        None,
-    );
-    write_visual_preview(
-        &output_dir,
-        "after-user-message-960x640",
-        Vec2::new(960.0, 640.0),
-        Some("Can you help me plan today?"),
-    );
-    write_visual_preview(
-        &output_dir,
-        "after-hide-720x480",
-        Vec2::new(720.0, 480.0),
-        Some("/hide"),
-    );
+    let scenarios = [
+        ("native-default-1220x960", Vec2::new(1220.0, 960.0), None),
+        ("minimum-default-720x480", Vec2::new(720.0, 480.0), None),
+    ];
+
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        for (name, size, input) in scenarios {
+            let name = match theme {
+                egui::Theme::Light => name.to_owned(),
+                egui::Theme::Dark => format!("dark-{name}"),
+            };
+            visual_preview(size, input, theme)
+                .save(output_dir.join(format!("{name}.png")))
+                .expect("save visual evidence");
+        }
+    }
 }
 
-fn write_visual_preview(output_dir: &Path, name: &str, size: Vec2, input: Option<&str>) {
-    let image = visual_preview(size, input);
-    image
-        .save(output_dir.join(format!("{name}.png")))
-        .expect("save visual evidence");
-}
-
-fn visual_preview(size: Vec2, input: Option<&str>) -> RgbaImage {
+fn visual_preview(size: Vec2, input: Option<&str>, theme: egui::Theme) -> RgbaImage {
     let width = size.x.round() as u32;
     let height = size.y.round() as u32;
     let font = FontArc::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).expect("font");
-    let mut image = RgbaImage::from_pixel(width, height, rgb(242, 244, 239));
+    let mut image = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
 
-    draw_text_aligned(
-        &mut image,
-        &font,
-        "Donna",
-        Vec2::new(width as f32 / 2.0 - 8.0, 12.0),
-        24.0,
-        rgb(31, 41, 51),
-        TextAlign::Right,
-    );
-    draw_text(
-        &mut image,
-        &font,
-        "local-first assistant shell",
-        width as f32 / 2.0 + 4.0,
-        20.0,
-        14.0,
-        rgb(89, 96, 103),
-    );
-
-    let body_top = 68.0;
-    let body_available = Vec2::new(size.x, size.y - body_top - 18.0);
-    let layout = shell_layout(body_available);
+    let layout = shell_layout(size);
+    let content_width = layout.avatar_width + layout.gap + layout.chat_width;
+    let content_height = layout.avatar_height.max(layout.chat_height);
+    let content_left = ((size.x - content_width) / 2.0).max(0.0);
+    let body_top = ((size.y - content_height) / 2.0).max(0.0);
     let messages = preview_messages(input);
     let state = if input == Some("/hide") {
         "Hidden"
@@ -88,47 +59,26 @@ fn visual_preview(size: Vec2, input: Option<&str>) -> RgbaImage {
         AvatarState::Idle(1)
     };
 
-    if layout.stacked {
-        let avatar_outer = layout.avatar_side + AVATAR_FRAME_MARGIN;
-        let avatar_x = (size.x - avatar_outer) / 2.0;
-        draw_avatar(
-            &mut image,
-            avatar_x,
-            body_top,
-            layout.avatar_side,
-            avatar_state,
-        );
-
-        let chat_outer = layout.chat_width + CHAT_FRAME_MARGIN;
-        let chat_x = (size.x - chat_outer) / 2.0;
-        draw_chat(
-            &mut image,
-            &font,
-            ChatPreview {
-                x: chat_x,
-                y: body_top + avatar_outer + layout.gap,
-                width: layout.chat_width,
-                height: layout.chat_height,
-                state,
-                messages: &messages,
-            },
-        );
-    } else {
-        let x = ((size.x - shell_width(layout)) / 2.0).max(0.0);
-        draw_avatar(&mut image, x, body_top, layout.avatar_side, avatar_state);
-        draw_chat(
-            &mut image,
-            &font,
-            ChatPreview {
-                x: x + layout.avatar_side + AVATAR_FRAME_MARGIN + layout.gap,
-                y: body_top,
-                width: layout.chat_width,
-                height: layout.chat_height,
-                state,
-                messages: &messages,
-            },
-        );
-    }
+    draw_avatar(
+        &mut image,
+        content_left,
+        body_top,
+        Vec2::new(layout.avatar_width, layout.avatar_height),
+        avatar_state,
+    );
+    draw_chat(
+        &mut image,
+        &font,
+        ChatPreview {
+            x: content_left + layout.avatar_width + layout.gap,
+            y: body_top,
+            width: layout.chat_width,
+            height: layout.chat_height,
+            state,
+            messages: &messages,
+            theme,
+        },
+    );
 
     image
 }
@@ -145,6 +95,7 @@ struct ChatPreview<'a> {
     height: f32,
     state: &'static str,
     messages: &'a [PreviewMessage],
+    theme: egui::Theme,
 }
 
 #[derive(Clone, Copy)]
@@ -187,17 +138,14 @@ fn preview_messages(input: Option<&str>) -> Vec<PreviewMessage> {
     messages
 }
 
-fn draw_avatar(image: &mut RgbaImage, x: f32, y: f32, side: f32, state: AvatarState) {
-    let outer = side + AVATAR_FRAME_MARGIN;
-    fill_rect(image, x, y, outer, outer, rgb(232, 236, 230));
-
+fn draw_avatar(image: &mut RgbaImage, x: f32, y: f32, size: Vec2, state: AvatarState) {
     let bytes = AvatarManager::asset_bytes(DEFAULT_CHARACTER, state).expect("embedded avatar");
     let avatar = image::load_from_memory(bytes.as_ref())
         .expect("decode avatar")
         .to_rgba8();
     let image_size = avatar_image_size(
         Vec2::new(avatar.width() as f32, avatar.height() as f32),
-        side,
+        size,
     );
     if image_size.x <= 0.0 || image_size.y <= 0.0 {
         return;
@@ -209,58 +157,71 @@ fn draw_avatar(image: &mut RgbaImage, x: f32, y: f32, side: f32, state: AvatarSt
     overlay(
         image,
         &avatar,
-        x + (outer - image_width as f32) / 2.0,
-        y + (outer - image_height as f32) / 2.0,
+        x + (size.x - image_width as f32) / 2.0,
+        y + (size.y - image_height as f32) / 2.0,
     );
 }
 
 fn draw_chat(image: &mut RgbaImage, font: &FontArc, preview: ChatPreview<'_>) {
-    let outer_width = preview.width + CHAT_FRAME_MARGIN;
-    let outer_height = preview.height + CHAT_FRAME_MARGIN;
+    let palette = palette_for(preview.theme);
+    let visuals = app_visuals(preview.theme);
+    let outer_width = preview.width;
+    let outer_height = preview.height;
     let inner_x = preview.x + 14.0;
     let inner_y = preview.y + 14.0;
-    let bar_y = preview.y + outer_height - 86.0;
+    let inner_width = (preview.width - 28.0).max(0.0);
+    let bar_height = chat_bar_reserved_height(inner_width);
+    let compact = bar_height > 88.0;
+    let bar_y = preview.y + outer_height - bar_height;
     fill_rect(
         image,
         preview.x,
         preview.y,
         outer_width,
         outer_height,
-        rgb(252, 252, 249),
+        rgba(palette.chat_fill),
     );
 
     let mut message_y = inner_y + 8.0;
+    let scroll_bottom = bar_y - 8.0;
     for message in preview.messages {
         let max_width = preview.width * 0.72;
         let lines = wrap_text(font, message.text, max_width, 14.0);
         let bubble_height = 18.0 + lines.len() as f32 * 17.0;
+        if message_y >= scroll_bottom {
+            break;
+        }
+
         let bubble_width = bubble_width(font, &lines, 14.0, max_width);
         let bubble_x = match message.speaker {
             Speaker::Donna => inner_x,
             Speaker::User => inner_x + preview.width - bubble_width,
         };
-        let fill = match message.speaker {
-            Speaker::Donna => rgb(238, 245, 255),
-            Speaker::User => rgb(234, 247, 239),
-        };
+        let fill = default_message_color(message.speaker, preview.theme);
+        let visible_height = bubble_height.min(scroll_bottom - message_y);
 
         fill_rect(
             image,
             bubble_x,
             message_y,
             bubble_width,
-            bubble_height,
-            fill,
+            visible_height,
+            rgba(fill),
         );
         for (index, line) in lines.iter().enumerate() {
+            let line_y = message_y + 10.0 + index as f32 * 17.0;
+            if line_y + 17.0 > scroll_bottom {
+                break;
+            }
+
             draw_text(
                 image,
                 font,
                 line,
                 bubble_x + 12.0,
-                message_y + 10.0 + index as f32 * 17.0,
+                line_y,
                 14.0,
-                rgb(31, 41, 51),
+                rgba(readable_text_color(fill)),
             );
         }
         message_y += bubble_height + 8.0;
@@ -270,9 +231,9 @@ fn draw_chat(image: &mut RgbaImage, font: &FontArc, preview: ChatPreview<'_>) {
         image,
         inner_x,
         bar_y,
-        preview.width,
+        inner_width,
         1.0,
-        rgb(215, 221, 213),
+        rgba(visuals.widgets.noninteractive.bg_stroke.color),
     );
     draw_text(
         image,
@@ -281,56 +242,86 @@ fn draw_chat(image: &mut RgbaImage, font: &FontArc, preview: ChatPreview<'_>) {
         inner_x,
         bar_y + 8.0,
         13.0,
-        rgb(72, 83, 92),
+        rgba(palette.notice_text),
     );
-    draw_text_aligned(
-        image,
-        font,
-        "Ollama local",
-        Vec2::new(inner_x + preview.width, bar_y + 8.0),
-        13.0,
-        rgb(72, 83, 92),
-        TextAlign::Right,
-    );
+    if compact {
+        draw_text(
+            image,
+            font,
+            "Ollama local",
+            inner_x,
+            bar_y + 25.0,
+            13.0,
+            rgba(palette.notice_text),
+        );
+    } else {
+        draw_text_aligned(
+            image,
+            font,
+            "Ollama local",
+            Vec2::new(inner_x + inner_width, bar_y + 8.0),
+            13.0,
+            rgba(palette.notice_text),
+            TextAlign::Right,
+        );
+    }
 
-    let input_y = bar_y + 34.0;
-    let input_width = (preview.width - 74.0).max(96.0);
-    fill_rect(
-        image,
-        inner_x,
-        input_y,
-        input_width,
-        34.0,
-        rgb(255, 255, 255),
-    );
+    let input_y = if compact { bar_y + 48.0 } else { bar_y + 34.0 };
+    let input_width = if compact {
+        inner_width
+    } else {
+        (inner_width - 74.0).max(96.0)
+    };
+    let input_fill = visuals
+        .text_edit_bg_color
+        .unwrap_or(visuals.extreme_bg_color);
+    fill_rect(image, inner_x, input_y, input_width, 34.0, rgba(input_fill));
     stroke_rect(
         image,
         inner_x,
         input_y,
         input_width,
         34.0,
-        rgb(184, 193, 180),
+        rgba(visuals.widgets.inactive.bg_stroke.color),
     );
     draw_text(
         image,
         font,
-        "Message Donna",
+        if compact { "Message" } else { "Message Donna" },
         inner_x + 10.0,
         input_y + 9.0,
         14.0,
-        rgb(139, 148, 158),
+        rgba(palette.notice_text),
     );
 
-    let send_x = inner_x + preview.width - 64.0;
-    fill_rect(image, send_x, input_y, 64.0, 34.0, rgb(238, 241, 236));
-    stroke_rect(image, send_x, input_y, 64.0, 34.0, rgb(174, 184, 170));
+    let (send_x, send_y, send_width) = if compact {
+        (inner_x, input_y + 40.0, inner_width)
+    } else {
+        (inner_x + inner_width - 64.0, input_y, 64.0)
+    };
+    fill_rect(
+        image,
+        send_x,
+        send_y,
+        send_width,
+        34.0,
+        rgba(visuals.widgets.inactive.bg_fill),
+    );
+    stroke_rect(
+        image,
+        send_x,
+        send_y,
+        send_width,
+        34.0,
+        rgba(visuals.widgets.inactive.bg_stroke.color),
+    );
     draw_text_aligned(
         image,
         font,
         "Send",
-        Vec2::new(send_x + 32.0, input_y + 9.0),
+        Vec2::new(send_x + send_width / 2.0, send_y + 9.0),
         14.0,
-        rgb(31, 41, 51),
+        rgba(palette.heading_text),
         TextAlign::Center,
     );
 }
@@ -485,15 +476,24 @@ fn blend_pixel(image: &mut RgbaImage, x: i32, y: i32, source: Rgba<u8>) {
         return;
     }
 
-    let alpha = source[3] as f32 / 255.0;
+    let source_alpha = source[3] as f32 / 255.0;
     let target = image.get_pixel_mut(x as u32, y as u32);
-    for channel in 0..3 {
-        target[channel] =
-            (source[channel] as f32 * alpha + target[channel] as f32 * (1.0 - alpha)).round() as u8;
+    let target_alpha = target[3] as f32 / 255.0;
+    let out_alpha = source_alpha + target_alpha * (1.0 - source_alpha);
+    if out_alpha == 0.0 {
+        *target = Rgba([0, 0, 0, 0]);
+        return;
     }
-    target[3] = 255;
+
+    for channel in 0..3 {
+        let value = (source[channel] as f32 * source_alpha
+            + target[channel] as f32 * target_alpha * (1.0 - source_alpha))
+            / out_alpha;
+        target[channel] = value.round() as u8;
+    }
+    target[3] = (out_alpha * 255.0).round() as u8;
 }
 
-fn rgb(red: u8, green: u8, blue: u8) -> Rgba<u8> {
-    Rgba([red, green, blue, 255])
+fn rgba(color: Color32) -> Rgba<u8> {
+    Rgba([color.r(), color.g(), color.b(), color.a()])
 }

@@ -1,7 +1,8 @@
+use crate::app::ui_style::palette_for;
 use crate::attention::{AttentionCandidate, AttentionLevel, AttentionPolicy};
 use crate::config::AttentionConfig;
 use crate::storage::{AttentionItem, LocalStore};
-use eframe::egui::{self, Button, Color32, CornerRadius, FontId, Frame, Margin, RichText, Vec2};
+use eframe::egui::{self, Button, CornerRadius, FontId, Frame, Margin, RichText, Vec2};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Default)]
@@ -56,8 +57,10 @@ impl AttentionUiState {
         };
 
         let mut action = None;
+        let palette = palette_for(ui.ctx().theme());
         Frame::NONE
-            .fill(Color32::from_rgb(255, 248, 224))
+            .fill(palette.attention_card_fill)
+            .stroke(egui::Stroke::new(1.0, palette.attention_card_stroke))
             .corner_radius(CornerRadius::same(8))
             .inner_margin(Margin::same(12))
             .show(ui, |ui| {
@@ -66,11 +69,12 @@ impl AttentionUiState {
                     ui.label(
                         RichText::new(item.level.to_uppercase())
                             .font(FontId::proportional(11.0))
-                            .color(Color32::from_rgb(127, 83, 26)),
+                            .color(palette.attention_level_text),
                     );
                     ui.label(
                         RichText::new(&item.title)
                             .font(FontId::proportional(15.0))
+                            .color(palette.attention_title_text)
                             .strong(),
                     );
                 });
@@ -80,7 +84,7 @@ impl AttentionUiState {
                     ui.label(
                         RichText::new(body)
                             .font(FontId::proportional(13.0))
-                            .color(Color32::from_rgb(72, 83, 92)),
+                            .color(palette.attention_body_text),
                     );
                 }
 

@@ -29,9 +29,10 @@ pub struct UiConfig {
     pub user_message_color: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UiThemeMode {
+    #[default]
     Auto,
     Light,
     Dark,
@@ -53,12 +54,6 @@ impl UiThemeMode {
             Self::Light => "light",
             Self::Dark => "dark",
         }
-    }
-}
-
-impl Default for UiThemeMode {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 

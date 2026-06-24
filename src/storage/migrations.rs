@@ -40,11 +40,18 @@ pub(super) fn apply_migrations(connection: &Connection) -> rusqlite::Result<()> 
 }
 
 fn migrations() -> &'static [Migration] {
-    &[Migration {
-        version: 1,
-        name: "local_foundation",
-        sql: LOCAL_FOUNDATION,
-    }]
+    &[
+        Migration {
+            version: 1,
+            name: "local_foundation",
+            sql: LOCAL_FOUNDATION,
+        },
+        Migration {
+            version: 2,
+            name: "attention_workflows",
+            sql: ATTENTION_WORKFLOWS,
+        },
+    ]
 }
 
 const LOCAL_FOUNDATION: &str = r#"
@@ -240,6 +247,31 @@ CREATE VIRTUAL TABLE search_index USING fts5(
 );
 "#;
 
+const ATTENTION_WORKFLOWS: &str = r#"
+ALTER TABLE follow_ups ADD COLUMN snoozed_until INTEGER;
+ALTER TABLE follow_ups ADD COLUMN dismissed_at INTEGER;
+
+CREATE TABLE attention_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type TEXT NOT NULL,
+    source_id INTEGER,
+    level TEXT NOT NULL
+        CHECK (level IN ('info', 'normal', 'important', 'critical')),
+    title TEXT NOT NULL,
+    body TEXT,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'done', 'dismissed', 'snoozed', 'stale')),
+    due_at INTEGER,
+    snoozed_until INTEGER,
+    dismissed_at INTEGER,
+    completed_at INTEGER,
+    feedback TEXT,
+    payload TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::apply_migrations;
@@ -256,7 +288,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count migrations");
-        assert_eq!(version_count, 1);
+        assert_eq!(version_count, 2);
 
         for table in [
             "memories",
@@ -270,6 +302,7 @@ mod tests {
             "task_findings",
             "sync_state",
             "audit_log",
+            "attention_items",
             "search_index",
         ] {
             let exists: bool = connection

@@ -1,8 +1,12 @@
+mod attention_records;
 mod audit;
 mod connection;
+mod followups;
 mod microsoft;
 mod migrations;
+mod notes;
 mod repositories;
+mod search;
 mod task_records;
 mod types;
 
@@ -12,8 +16,9 @@ mod repositories_tests;
 pub use audit::{AuditEntry, NewAuditEntry};
 pub use connection::{LocalStore, StorageError};
 pub use types::{
-    CalendarEvent, DataFreshness, FollowUp, NewCalendarEvent, NewFollowUp, NewMemory,
-    NewOutlookMessage, NewPerson, NewSyncState, NewTaskFinding, NewTaskRun, NewTeamsMessage,
-    NewTodo, OutlookMessage, Person, StoredMemory, StoredTodo, SyncState, TaskFinding, TaskRun,
-    TeamsMessage,
+    AttentionItem, CalendarEvent, DataFreshness, FollowUp, NewAttentionItem, NewCalendarEvent,
+    NewFollowUp, NewMemory, NewNoteMetadata, NewOutlookMessage, NewPerson, NewSyncState,
+    NewTaskFinding, NewTaskRun, NewTeamsMessage, NewTodo, NoteMetadata, OutlookMessage, Person,
+    SearchContentTrust, SearchQuery, SearchResult, StoredMemory, StoredTodo, SyncState,
+    TaskFinding, TaskRun, TeamsMessage,
 };

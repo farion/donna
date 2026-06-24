@@ -90,9 +90,35 @@ pub struct FollowUp {
     pub summary: String,
     pub due_at: Option<i64>,
     pub stale_at: Option<i64>,
+    pub snoozed_until: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     pub resolved_at: Option<i64>,
+    pub dismissed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewNoteMetadata {
+    pub vault_path: String,
+    pub note_path: String,
+    pub title: Option<String>,
+    pub headings: Vec<String>,
+    pub tags: Vec<String>,
+    pub links: Vec<String>,
+    pub modified_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteMetadata {
+    pub id: i64,
+    pub vault_path: String,
+    pub note_path: String,
+    pub title: Option<String>,
+    pub headings: Vec<String>,
+    pub tags: Vec<String>,
+    pub links: Vec<String>,
+    pub modified_at: Option<i64>,
+    pub indexed_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,8 +280,73 @@ pub struct TaskFinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewAttentionItem {
+    pub source_type: String,
+    pub source_id: Option<i64>,
+    pub level: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub due_at: Option<i64>,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionItem {
+    pub id: i64,
+    pub source_type: String,
+    pub source_id: Option<i64>,
+    pub level: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub status: String,
+    pub due_at: Option<i64>,
+    pub snoozed_until: Option<i64>,
+    pub dismissed_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub feedback: Option<String>,
+    pub payload: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchContentTrust {
+    LocalStructuredData,
+    ExternalUntrustedData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    pub record_types: Vec<String>,
+    pub source: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub record_type: String,
+    pub record_id: i64,
+    pub title: String,
+    pub snippet: String,
+    pub source: String,
+    pub trust: SearchContentTrust,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataFreshness {
     Fresh,
     Stale { error: Option<String> },
     NeverSynced,
+}
+
+impl SearchQuery {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            record_types: Vec::new(),
+            source: None,
+            limit: 20,
+        }
+    }
 }

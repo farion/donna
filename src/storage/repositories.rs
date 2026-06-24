@@ -211,7 +211,8 @@ impl LocalStore {
         self.connection
             .query_row(
                 "SELECT id, direction, person_id, status, source, summary, due_at,
-                    stale_at, created_at, updated_at, resolved_at
+                    stale_at, snoozed_until, created_at, updated_at, resolved_at,
+                    dismissed_at
                  FROM follow_ups
                  WHERE id = ?1",
                 [id],
@@ -408,7 +409,7 @@ fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {
     })
 }
 
-fn follow_up_from_row(row: &Row<'_>) -> rusqlite::Result<FollowUp> {
+pub(super) fn follow_up_from_row(row: &Row<'_>) -> rusqlite::Result<FollowUp> {
     Ok(FollowUp {
         id: row.get(0)?,
         direction: row.get(1)?,
@@ -418,9 +419,11 @@ fn follow_up_from_row(row: &Row<'_>) -> rusqlite::Result<FollowUp> {
         summary: row.get(5)?,
         due_at: row.get(6)?,
         stale_at: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-        resolved_at: row.get(10)?,
+        snoozed_until: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        resolved_at: row.get(11)?,
+        dismissed_at: row.get(12)?,
     })
 }
 

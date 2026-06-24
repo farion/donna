@@ -67,7 +67,15 @@ impl LocalStore {
             ],
         )?;
 
-        self.task_finding(self.connection.last_insert_rowid())
+        let finding = self.task_finding(self.connection.last_insert_rowid())?;
+        self.insert_search_record(
+            "task_finding",
+            finding.id,
+            &finding.kind,
+            &finding.summary,
+            &finding.source,
+        )?;
+        Ok(finding)
     }
 
     pub fn task_finding(&self, id: i64) -> Result<TaskFinding, StorageError> {

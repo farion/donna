@@ -111,6 +111,10 @@ pub struct MemoryConfig {
 #[serde(default)]
 pub struct AttentionConfig {
     pub enabled: bool,
+    pub notification_min_level: String,
+    pub popup_min_level: String,
+    pub popup_cooldown_seconds: u32,
+    pub critical_bypasses_cooldown: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -300,7 +304,13 @@ impl Default for MemoryConfig {
 
 impl Default for AttentionConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            notification_min_level: "normal".to_owned(),
+            popup_min_level: "important".to_owned(),
+            popup_cooldown_seconds: 900,
+            critical_bypasses_cooldown: true,
+        }
     }
 }
 

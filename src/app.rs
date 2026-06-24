@@ -13,6 +13,8 @@ use eframe::egui::{
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod status;
+
 const AVATAR_MIN_SIDE: f32 = 220.0;
 const AVATAR_MAX_SIDE: f32 = 480.0;
 const CHAT_WIDTH_RATIO: f32 = 0.8;
@@ -353,8 +355,13 @@ impl DonnaApp {
 
     fn render_chat_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
+            let status_label = status::status_label(
+                self.state_label(),
+                self.store.as_ref(),
+                self.config.offline.show_stale_data_warnings,
+            );
             ui.label(
-                RichText::new(self.state_label())
+                RichText::new(status_label)
                     .font(FontId::proportional(13.0))
                     .color(Color32::from_rgb(72, 83, 92)),
             );

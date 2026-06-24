@@ -4,7 +4,7 @@ use super::super::layout::{
     CHAT_WIDTH_RATIO, HORIZONTAL_GAP, ShellLayout, avatar_image_size, shell_layout,
 };
 use super::super::native_options;
-use super::app_harness;
+use super::{app_harness, submit_text};
 use eframe::App;
 use eframe::egui::{self, Vec2};
 use egui_kittest::kittest::Queryable;
@@ -147,6 +147,26 @@ fn minimum_chat_bar_controls_keep_horizontal_widths() {
     assert!(
         send.width() >= 120.0,
         "compact send button should fill the chat bar width, got {send:?}"
+    );
+}
+
+#[test]
+fn messages_do_not_expand_half_scale_chat_width() {
+    let window_size = Vec2::new(820.0, 476.0);
+    let layout = shell_layout(window_size);
+    let max_message_width = (layout.chat_width - CHAT_INNER_MARGIN * 2.0).max(0.0) * 0.72;
+    let (_config_dir, mut harness) = app_harness(window_size);
+
+    submit_text(&mut harness, "hi");
+    harness.run_steps(1);
+
+    let donna_reply = harness
+        .get_by_label_contains("Ollama local is selected")
+        .rect();
+
+    assert!(
+        donna_reply.width() <= max_message_width + 1.0,
+        "Donna reply should wrap inside computed chat width {max_message_width}, got {donna_reply:?}"
     );
 }
 

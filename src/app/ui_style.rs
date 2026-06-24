@@ -102,10 +102,13 @@ pub(super) fn render_message(
             .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
                 ui.set_max_width(chat_width * 0.72);
-                ui.label(
-                    RichText::new(text)
-                        .font(FontId::proportional(14.0))
-                        .color(text_color),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text)
+                            .font(FontId::proportional(14.0))
+                            .color(text_color),
+                    )
+                    .wrap(),
                 );
             });
     });

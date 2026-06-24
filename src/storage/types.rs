@@ -117,6 +117,102 @@ pub struct SyncState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewOutlookMessage {
+    pub external_id: String,
+    pub folder_id: Option<String>,
+    pub subject: Option<String>,
+    pub sender_name: Option<String>,
+    pub sender_email: Option<String>,
+    pub body_preview: Option<String>,
+    pub received_at: Option<i64>,
+    pub etag: Option<String>,
+    pub change_key: Option<String>,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlookMessage {
+    pub id: i64,
+    pub external_id: String,
+    pub folder_id: Option<String>,
+    pub subject: Option<String>,
+    pub sender_name: Option<String>,
+    pub sender_email: Option<String>,
+    pub body_preview: Option<String>,
+    pub received_at: Option<i64>,
+    pub synced_at: i64,
+    pub etag: Option<String>,
+    pub change_key: Option<String>,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTeamsMessage {
+    pub external_id: String,
+    pub chat_id: String,
+    pub sender_name: Option<String>,
+    pub sender_external_id: Option<String>,
+    pub body: String,
+    pub importance: Option<String>,
+    pub web_url: Option<String>,
+    pub sent_at: Option<i64>,
+    pub etag: Option<String>,
+    pub change_key: Option<String>,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamsMessage {
+    pub id: i64,
+    pub external_id: String,
+    pub chat_id: String,
+    pub sender_name: Option<String>,
+    pub sender_external_id: Option<String>,
+    pub body: String,
+    pub importance: Option<String>,
+    pub web_url: Option<String>,
+    pub sent_at: Option<i64>,
+    pub synced_at: i64,
+    pub etag: Option<String>,
+    pub change_key: Option<String>,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewCalendarEvent {
+    pub external_id: String,
+    pub subject: Option<String>,
+    pub organizer_name: Option<String>,
+    pub organizer_email: Option<String>,
+    pub starts_at: Option<i64>,
+    pub ends_at: Option<i64>,
+    pub original_timezone: Option<String>,
+    pub show_as: Option<String>,
+    pub etag: Option<String>,
+    pub change_key: Option<String>,
+    pub is_cancelled: bool,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarEvent {
+    pub id: i64,
+    pub external_id: String,
+    pub subject: Option<String>,
+    pub organizer_name: Option<String>,
+    pub organizer_email: Option<String>,
+    pub starts_at: Option<i64>,
+    pub ends_at: Option<i64>,
+    pub original_timezone: Option<String>,
+    pub show_as: Option<String>,
+    pub synced_at: i64,
+    pub etag: Option<String>,
+    pub change_key: Option<String>,
+    pub is_cancelled: bool,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTaskRun {
     pub task_id: String,
     pub task_model_id: String,

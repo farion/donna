@@ -10,11 +10,16 @@ Run the desktop UI:
 donna
 ```
 
-Run the auth setup placeholder:
+Run the Microsoft Graph auth setup wizard:
 
 ```sh
 donna --auth
 ```
+
+The wizard asks for the Microsoft app client id, tenant id, optional account
+hint, and the OS secret-storage reference to use for tokens. It saves only
+non-secret metadata to `donna.toml`, then starts Microsoft delegated device-code
+auth and writes token JSON to OS secret storage.
 
 ## Config
 

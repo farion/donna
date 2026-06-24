@@ -320,7 +320,31 @@ impl LocalStore {
         Ok(values)
     }
 
-    fn insert_search_record(
+    pub(super) fn replace_search_record(
+        &self,
+        record_type: &str,
+        record_id: i64,
+        title: &str,
+        body: &str,
+        source: &str,
+    ) -> Result<(), StorageError> {
+        self.delete_search_record(record_type, record_id)?;
+        self.insert_search_record(record_type, record_id, title, body, source)
+    }
+
+    pub(super) fn delete_search_record(
+        &self,
+        record_type: &str,
+        record_id: i64,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM search_index WHERE record_type = ?1 AND record_id = ?2",
+            params![record_type, record_id],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn insert_search_record(
         &self,
         record_type: &str,
         record_id: i64,

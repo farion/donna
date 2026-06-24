@@ -6,6 +6,7 @@ pub mod chat;
 pub mod command;
 pub mod config;
 pub mod memory;
+pub mod microsoft;
 pub mod model;
 pub mod prompts;
 pub mod secrets;

@@ -66,9 +66,12 @@ pub struct ModelConfig {
     pub secret_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MicrosoftConfig {
+    pub client_id: Option<String>,
+    pub tenant_id: String,
+    pub scopes: Vec<String>,
     pub account_hint: Option<String>,
     pub token_secret_ref: Option<String>,
 }
@@ -206,6 +209,18 @@ impl Default for AvatarConfig {
     fn default() -> Self {
         Self {
             character: "donna".to_owned(),
+        }
+    }
+}
+
+impl Default for MicrosoftConfig {
+    fn default() -> Self {
+        Self {
+            client_id: None,
+            tenant_id: "common".to_owned(),
+            scopes: default_microsoft_scopes(),
+            account_hint: None,
+            token_secret_ref: None,
         }
     }
 }
@@ -355,6 +370,24 @@ fn default_models() -> Vec<ModelConfig> {
     ]
 }
 
+fn default_microsoft_scopes() -> Vec<String> {
+    [
+        "User.Read",
+        "offline_access",
+        "Mail.Read",
+        "Mail.Send",
+        "Calendars.ReadWrite",
+        "ChatMessage.Send",
+        "Chat.ReadWrite",
+        "ChannelMessage.Read.All",
+        "ChannelMessage.Send",
+        "Team.ReadBasic.All",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
@@ -411,11 +444,13 @@ mod tests {
     #[test]
     fn serialized_config_keeps_secret_values_out_of_toml() {
         let mut config = AppConfig::default();
+        config.microsoft.client_id = Some("client-id".to_owned());
         config.microsoft.token_secret_ref = Some("donna/microsoft".to_owned());
 
         let contents = toml::to_string_pretty(&config).expect("serialize config");
 
         assert!(contents.contains("secret_ref = \"donna/openai\""));
+        assert!(contents.contains("client_id = \"client-id\""));
         assert!(contents.contains("token_secret_ref = \"donna/microsoft\""));
         assert!(!contents.contains("api_key"));
         assert!(!contents.contains("access_token"));

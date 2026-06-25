@@ -87,15 +87,72 @@ pub fn release_socket_path(socket_path: &Path) {
 
 pub fn wakeup_window() -> bool {
     if std::env::var_os("SWAYSOCK").is_some() {
-        return command_succeeds("swaymsg", &[r#"[app_id="donna"] focus"#])
-            || command_succeeds("swaymsg", &[r#"[app_id="donna"] scratchpad show"#]);
+        return wakeup_sway_window_without_keeping_focus();
     }
     if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-        return command_succeeds("hyprctl", &["dispatch", "focuswindow", "class:donna"])
-            || command_succeeds("hyprctl", &["dispatch", "togglespecialworkspace", "donna"]);
+        return wakeup_hyprland_window_without_keeping_focus();
     }
 
     false
+}
+
+fn wakeup_sway_window_without_keeping_focus() -> bool {
+    let focused = focused_sway_con_id();
+    let shown = command_succeeds("swaymsg", &[r#"[app_id="donna"] scratchpad show"#]);
+    if let Some(id) = focused {
+        let selector = format!("[con_id={id}] focus");
+        let _ = command_succeeds("swaymsg", &[&selector]);
+    }
+    shown
+}
+
+fn wakeup_hyprland_window_without_keeping_focus() -> bool {
+    let focused = hyprland_active_window_address();
+    let shown = command_succeeds("hyprctl", &["dispatch", "togglespecialworkspace", "donna"]);
+    if let Some(address) = focused {
+        let selector = format!("address:{address}");
+        let _ = command_succeeds("hyprctl", &["dispatch", "focuswindow", &selector]);
+    }
+    shown
+}
+
+fn focused_sway_con_id() -> Option<i64> {
+    let output = command_stdout("swaymsg", &["-t", "get_tree"])?;
+    let tree = serde_json::from_slice::<serde_json::Value>(&output).ok()?;
+    focused_sway_node_id(&tree)
+}
+
+fn focused_sway_node_id(node: &serde_json::Value) -> Option<i64> {
+    if node.get("focused").and_then(serde_json::Value::as_bool) == Some(true) {
+        return node.get("id").and_then(serde_json::Value::as_i64);
+    }
+
+    node.get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            node.get("floating_nodes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .find_map(focused_sway_node_id)
+}
+
+fn hyprland_active_window_address() -> Option<String> {
+    let output = command_stdout("hyprctl", &["activewindow", "-j"])?;
+    let window = serde_json::from_slice::<serde_json::Value>(&output).ok()?;
+    window
+        .get("address")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .filter(|address| !address.is_empty() && address != "0x")
+}
+
+fn command_stdout(program: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new(program).args(args).output().ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {

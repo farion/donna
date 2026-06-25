@@ -72,8 +72,8 @@ fn wakeup_event_brings_ui_to_foreground() {
     assert!(
         commands
             .iter()
-            .any(|command| matches!(command, egui::ViewportCommand::Focus)),
-        "expected wakeup to focus the viewport, got {commands:?}"
+            .all(|command| !matches!(command, egui::ViewportCommand::Focus)),
+        "wakeup must not steal keyboard focus, got {commands:?}"
     );
 }
 
@@ -380,6 +380,483 @@ fn chat_can_change_open_todo_severity() {
             .iter()
             .any(|message| { message.text == "Set 'file receipts' to high priority." })
     );
+}
+
+#[test]
+fn chat_can_complete_existing_todo_and_create_another() {
+    let tool_reply = "[{\"tool\":\"complete_todo\",\"arguments\":{\"todo_id\":1}},{\"tool\":\"create_todo\",\"arguments\":{\"title\":\"wash dishes\",\"severity\":\"middle\"}}]";
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: format!("mock-response:{tool_reply}"),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let old = harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "file receipts".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "file receipts is done and add wash dishes");
+    harness.run_steps(8);
+
+    let store = harness.state().store.as_ref().expect("store");
+    assert_eq!(store.todo(old.id).expect("old todo").status, "done");
+    let open = store.open_todos(10).expect("open todos");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].title, "wash dishes");
+    assert!(harness.state().chat.messages().iter().any(|message| {
+        message.text.contains("Marked 'file receipts' done.")
+            && message.text.contains("Added todo: wash dishes.")
+    }));
+}
+
+#[test]
+fn chat_can_delete_todo() {
+    let tool_reply = "{\"tool\":\"delete_todo\",\"arguments\":{\"todo_id\":1}}";
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: format!("mock-response:{tool_reply}"),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let todo = harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "file receipts".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "delete file receipts");
+    harness.run_steps(8);
+
+    let store = harness.state().store.as_ref().expect("store");
+    assert_eq!(
+        store.todo(todo.id).expect("deleted todo").status,
+        "dismissed"
+    );
+    assert!(store.open_todos(10).expect("open todos").is_empty());
+    assert!(
+        harness
+            .state()
+            .chat
+            .messages()
+            .iter()
+            .any(|message| { message.text == "Deleted todo: file receipts." })
+    );
+}
+
+#[test]
+fn chat_can_complete_todo_with_common_tool_call_variants() {
+    let tool_reply = r#"{"name":"complete_todo","parameters":{"id":"1"}}"#;
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: format!("mock-response:{tool_reply}"),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let todo = harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "file receipts".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "file receipts is done");
+    harness.run_steps(8);
+
+    let store = harness.state().store.as_ref().expect("store");
+    assert_eq!(store.todo(todo.id).expect("done todo").status, "done");
+    assert!(store.open_todos(10).expect("open todos").is_empty());
+}
+
+#[test]
+fn chat_can_delete_todo_with_top_level_id() {
+    let tool_reply = r#"{"tool":"remove_todo","id":1}"#;
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: format!("mock-response:{tool_reply}"),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let todo = harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "file receipts".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "remove file receipts");
+    harness.run_steps(8);
+
+    let store = harness.state().store.as_ref().expect("store");
+    assert_eq!(
+        store.todo(todo.id).expect("removed todo").status,
+        "dismissed"
+    );
+    assert!(store.open_todos(10).expect("open todos").is_empty());
+}
+
+#[test]
+fn normal_todo_listing_excludes_done_todos() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-response:{\"tool\":\"list_todos\",\"arguments\":{}}".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let store = harness.state().store.as_ref().expect("store");
+    let done = store
+        .create_todo(&NewTodo {
+            title: "done thing".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("done todo");
+    store.update_todo_status(done.id, "done").expect("done");
+
+    submit_text(&mut harness, "show my todos");
+    harness.run_steps(8);
+
+    assert!(
+        harness
+            .state()
+            .chat
+            .messages()
+            .iter()
+            .any(|message| { message.text == "You have no open todos." })
+    );
+}
+
+#[test]
+fn explicit_completed_todo_listing_shows_done_todos() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-response:{\"tool\":\"list_completed_todos\",\"arguments\":{}}".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let store = harness.state().store.as_ref().expect("store");
+    let done = store
+        .create_todo(&NewTodo {
+            title: "done thing".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("done todo");
+    store.update_todo_status(done.id, "done").expect("done");
+
+    submit_text(&mut harness, "show completed todos");
+    harness.run_steps(8);
+
+    assert!(
+        harness
+            .state()
+            .chat
+            .messages()
+            .iter()
+            .any(|message| { message.text == "You have one completed todo: done thing." })
+    );
+}
+
+#[test]
+fn singular_completed_todo_listing_alias_shows_done_todos() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-response:{\"tool\":\"list_completed_todo\",\"arguments\":{}}".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let store = harness.state().store.as_ref().expect("store");
+    let done = store
+        .create_todo(&NewTodo {
+            title: "done thing".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("done todo");
+    store.update_todo_status(done.id, "done").expect("done");
+
+    submit_text(&mut harness, "any completed todo?");
+    harness.run_steps(8);
+
+    assert!(
+        harness
+            .state()
+            .chat
+            .messages()
+            .iter()
+            .any(|message| { message.text == "You have one completed todo: done thing." })
+    );
+}
+
+#[test]
+fn completing_todo_closes_open_todo_reminder() {
+    let (_config_dir, harness) = app_harness(Vec2::new(720.0, 480.0));
+    let store = harness.state().store.as_ref().expect("store");
+    let todo = store
+        .create_todo(&NewTodo {
+            title: "file receipts".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "high".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+    let reminder = store
+        .create_todo_reminder_attention(1_000)
+        .expect("reminder")
+        .expect("item");
+
+    store.update_todo_status(todo.id, "done").expect("done");
+
+    assert_eq!(
+        store.attention_item(reminder.id).expect("reminder").status,
+        "done"
+    );
+}
+
+#[test]
+fn create_todo_tool_rejects_ungrounded_title() {
+    let tool_reply = "{\"tool\":\"create_todo\",\"arguments\":{\"title\":\"prioritize the sprint backlog project\",\"severity\":\"middle\"}}";
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: format!("mock-response:{tool_reply}"),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+
+    submit_text(&mut harness, "show me my todos");
+    harness.run_steps(8);
+
+    let store = harness.state().store.as_ref().expect("store");
+    assert!(store.open_todos(10).expect("open todos").is_empty());
+    assert!(harness.state().chat.messages().iter().any(|message| {
+        message.text == "I did not add that todo because it was not in your message."
+    }));
+}
+
+#[test]
+fn raw_todo_context_response_is_rendered_as_human_text() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-response:id=1 severity=high title=fix typo".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "fix typo".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "high".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "show me my todos");
+    harness.run_steps(8);
+
+    let answer = harness
+        .state()
+        .chat
+        .messages()
+        .iter()
+        .find(|message| message.text.contains("fix typo"))
+        .expect("answer")
+        .text
+        .as_str();
+    assert_eq!(
+        answer,
+        "You have one open todo: fix typo. It is high priority."
+    );
+    assert!(!answer.contains("id="));
+}
+
+#[test]
+fn bullet_raw_todo_context_response_is_rendered_as_human_text() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock-response:- id=2 severity=high title=fix typo\n- id=2 severity=low title=review Markus' cloud article".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "fix typo".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "high".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "show me my todos");
+    harness.run_steps(8);
+
+    let answer = harness
+        .state()
+        .chat
+        .messages()
+        .iter()
+        .find(|message| message.text.contains("fix typo"))
+        .expect("answer")
+        .text
+        .as_str();
+    assert_eq!(
+        answer,
+        "You have one open todo: fix typo. It is high priority."
+    );
+    assert!(!answer.contains("id="));
+    assert!(!answer.contains("Markus"));
+}
+
+#[test]
+fn generic_create_todo_phrase_is_rejected_not_reinterpreted() {
+    let tool_reply = "{\"tool\":\"create_todo\",\"arguments\":{\"title\":\"be done today\",\"severity\":\"high\"}}";
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-tool".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-tool".to_owned(),
+            label: "Mock tool".to_owned(),
+            provider: "mock".to_owned(),
+            model: format!("mock-response:{tool_reply}"),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+        });
+    });
+    let todo = harness
+        .state()
+        .store
+        .as_ref()
+        .expect("store")
+        .create_todo(&NewTodo {
+            title: "review article".to_owned(),
+            notes: None,
+            source: "test".to_owned(),
+            related_topic: None,
+            severity: "middle".to_owned(),
+            due_at: None,
+        })
+        .expect("todo");
+
+    submit_text(&mut harness, "that must be done today");
+    harness.run_steps(8);
+
+    let store = harness.state().store.as_ref().expect("store");
+    assert_eq!(
+        store.todo(todo.id).expect("existing todo").severity,
+        "middle"
+    );
+    let open = store.open_todos(10).expect("open todos");
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].title, "review article");
+    assert!(harness.state().chat.messages().iter().any(|message| {
+        message.text == "I did not add that todo because it was not in your message."
+    }));
 }
 
 #[test]
@@ -1035,6 +1512,12 @@ fn attention_restores_hidden_ui_without_exiting() {
             .iter()
             .any(|command| matches!(command, egui::ViewportCommand::Minimized(false))),
         "expected attention to unminimize the viewport, got {commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|command| !matches!(command, egui::ViewportCommand::Focus)),
+        "attention must not steal keyboard focus, got {commands:?}"
     );
 }
 

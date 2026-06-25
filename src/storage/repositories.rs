@@ -166,6 +166,22 @@ impl LocalStore {
         Ok(todos)
     }
 
+    pub fn completed_todos(&self, limit: usize) -> Result<Vec<StoredTodo>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, notes, status, source, related_topic, severity, due_at,
+                    snoozed_until, stale_at, created_at, updated_at, completed_at,
+                    dismissed_at
+             FROM todos
+             WHERE status = 'done'
+             ORDER BY completed_at DESC, updated_at DESC
+             LIMIT ?1",
+        )?;
+        let todos = statement
+            .query_map([limit.clamp(1, 100) as i64], todo_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(todos)
+    }
+
     pub fn update_todo_status(&self, id: i64, status: &str) -> Result<StoredTodo, StorageError> {
         let now = now_seconds()?;
         let completed_at = (status == "done").then_some(now);
@@ -179,8 +195,22 @@ impl LocalStore {
              WHERE id = ?6",
             params![status, now, completed_at, dismissed_at, stale_at, id],
         )?;
+        if matches!(status, "done" | "dismissed" | "stale") {
+            self.connection.execute(
+                "UPDATE attention_items
+                 SET status = 'done', completed_at = ?1, updated_at = ?1
+                 WHERE source_type = 'todo_reminder'
+                    AND source_id = ?2
+                    AND status IN ('open', 'snoozed')",
+                params![now, id],
+            )?;
+        }
 
         self.todo(id)
+    }
+
+    pub fn delete_todo(&self, id: i64) -> Result<StoredTodo, StorageError> {
+        self.update_todo_status(id, "dismissed")
     }
 
     pub fn update_todo_severity(

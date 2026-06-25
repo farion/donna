@@ -189,7 +189,6 @@ impl AttentionUiState {
         if decision.raise_window {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             self.last_popup_at = Some(now);
         }
 

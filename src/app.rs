@@ -10,7 +10,7 @@ use crate::ipc::{IpcEvent, wakeup_window};
 use crate::memory::{MemoryExtractor, SensitiveMemoryApproval};
 use crate::model::ModelRegistry;
 use crate::prompts::load_system_prompt;
-use crate::storage::{LocalStore, StoredMemory, StoredTodo};
+use crate::storage::{LocalStore, NewTodo, StoredMemory, StoredTodo};
 use crate::tasks::{CronDateTime, TaskDefinition, TaskKind, TaskRunnerState, load_task_directory};
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontId, Key, Layout, RichText, ScrollArea, Sense,
@@ -84,6 +84,7 @@ struct StreamingResponse {
     message_id: u64,
     text: String,
     placeholder: String,
+    user_message: String,
 }
 
 enum ChatWorkerEvent {
@@ -403,7 +404,6 @@ impl DonnaApp {
             wakeup_window();
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -521,6 +521,14 @@ impl DonnaApp {
                             .with_message(AiMessage::trusted(AiRole::User, message.text.as_str())),
                     },
                 );
+        let user_message = self
+            .chat
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.speaker == Speaker::User)
+            .map(|message| message.text.clone())
+            .unwrap_or_default();
 
         let Some(message_id) = self.chat.push_donna_message("...") else {
             return;
@@ -531,6 +539,7 @@ impl DonnaApp {
             message_id,
             text: String::new(),
             placeholder: String::new(),
+            user_message,
         });
         self.response_in_progress = true;
         self.response_started_at = Some(Instant::now());
@@ -575,7 +584,7 @@ impl DonnaApp {
         };
 
         system_prompt.push_str(
-            "\n\n## Current Open Todos\nThis is the only source of truth for the user's todos and tasks. Remembered facts are not todos. Do not invent todos. If this list says none, say there are no open todos and stop.\n",
+            "\n\n## Current Open Todos\nThis list contains only open todos. It intentionally excludes completed, dismissed, deleted, and stale todos. Treat normal requests like \"show my todos\" as requests for open todos only. Mention completed or deleted todos only if the user explicitly asks for completed, deleted, closed, or all todos. This is the only source of truth for the user's open todos and tasks. Remembered facts are not todos. Do not invent todos. If this list says none, say there are no open todos and stop.\n",
         );
         if todos.is_empty() {
             system_prompt.push_str("None.\n");
@@ -592,7 +601,7 @@ impl DonnaApp {
         }
 
         system_prompt.push_str(
-            "\n## Local Tools\nWhen the user asks about todos or wants to change a todo, either answer directly from Current Open Todos or emit exactly one JSON tool call and no other text. Available tool calls:\n- {\"tool\":\"list_open_todos\",\"arguments\":{}}\n- {\"tool\":\"update_todo_severity\",\"arguments\":{\"todo_id\":123,\"severity\":\"high\"}}\nValid severities: low, middle, high. Use update_todo_severity only when the todo id is clear from Current Open Todos.\n",
+            "\n## Local Tools\nWhen the user asks about todos or wants to change a todo, either answer directly from Current Open Todos or emit JSON tool calls and no other text. Normal todo listing means open todos only. Use list_completed_todos when the user explicitly asks for completed or done todos, including phrases like \"any completed todo?\", \"completed todos\", or \"done tasks\". Use an array when more than one todo action is needed. Available tool calls:\n- {\"tool\":\"list_open_todos\",\"arguments\":{}}\n- {\"tool\":\"list_completed_todos\",\"arguments\":{}}\n- {\"tool\":\"create_todo\",\"arguments\":{\"title\":\"file receipts\",\"severity\":\"middle\"}}\n- {\"tool\":\"complete_todo\",\"arguments\":{\"todo_id\":123}}\n- {\"tool\":\"delete_todo\",\"arguments\":{\"todo_id\":123}}\n- {\"tool\":\"update_todo_severity\",\"arguments\":{\"todo_id\":123,\"severity\":\"high\"}}\nValid severities: low, middle, high. Use todo ids from Current Open Todos. If a requested change has no clear matching todo id, ask the user to clarify instead of guessing. Do not create todos from references like \"that\", \"it\", \"this todo\", or scheduling phrases like \"must be done today\"; update the referenced existing todo instead.\n",
         );
     }
 
@@ -609,9 +618,11 @@ impl DonnaApp {
                         .replace_message_text(streaming.message_id, streaming.text.clone());
                 }
                 ChatWorkerEvent::Finished(text) => {
-                    if let Some(tool_result) =
-                        execute_tool_call_from_model(self.store.as_ref(), &text)
-                    {
+                    if let Some(tool_result) = execute_tool_call_from_model(
+                        self.store.as_ref(),
+                        &text,
+                        &streaming.user_message,
+                    ) {
                         self.chat
                             .replace_message_text(streaming.message_id, tool_result);
                         finished = true;
@@ -621,7 +632,7 @@ impl DonnaApp {
                         let text = if text.trim().is_empty() {
                             "The selected model returned an empty response.".to_owned()
                         } else {
-                            text
+                            humanize_model_todo_leak(self.store.as_ref(), text)
                         };
                         self.chat.replace_message_text(streaming.message_id, text);
                     }
@@ -813,30 +824,98 @@ fn fallback_welcome_message() -> String {
 
 #[derive(Debug, Deserialize)]
 struct ModelToolCall {
+    #[serde(alias = "name", alias = "function")]
     tool: String,
-    #[serde(default)]
+    #[serde(default, alias = "args", alias = "input", alias = "parameters")]
     arguments: serde_json::Value,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct UpdateTodoSeverityArgs {
     todo_id: i64,
     severity: String,
 }
 
-fn execute_tool_call_from_model(store: Option<&LocalStore>, text: &str) -> Option<String> {
-    let call = parse_model_tool_call(text)?;
+#[derive(Debug)]
+struct CompleteTodoArgs {
+    todo_id: i64,
+}
+
+#[derive(Debug)]
+struct CreateTodoArgs {
+    title: String,
+    severity: Option<String>,
+    notes: Option<String>,
+    related_topic: Option<String>,
+}
+
+fn execute_tool_call_from_model(
+    store: Option<&LocalStore>,
+    text: &str,
+    user_message: &str,
+) -> Option<String> {
+    let calls = parse_model_tool_calls(text)?;
     let Some(store) = store else {
         return Some("I cannot see a local todo store right now.".to_owned());
     };
 
-    Some(match call.tool.as_str() {
+    let results = calls
+        .into_iter()
+        .map(|call| execute_model_tool_call(store, call, user_message))
+        .collect::<Vec<_>>();
+
+    Some(results.join("\n"))
+}
+
+fn execute_model_tool_call(store: &LocalStore, call: ModelToolCall, user_message: &str) -> String {
+    let tool = normalize_tool_name(&call.tool);
+    match tool.as_str() {
         "list_open_todos" => match store.open_todos(20) {
             Ok(todos) => format_tool_todo_list(&todos),
             Err(error) => format!("I cannot read your todos: {error}"),
         },
+        "list_completed_todos" => match store.completed_todos(20) {
+            Ok(todos) => format_completed_todo_list(&todos),
+            Err(error) => format!("I cannot read your completed todos: {error}"),
+        },
+        "create_todo" => match CreateTodoArgs::from_call(&call) {
+            Ok(args) if args.title.trim().is_empty() => {
+                "I could not create that todo because it had no title.".to_owned()
+            }
+            Ok(args) if !title_is_grounded_in_user_message(&args.title, user_message) => {
+                "I did not add that todo because it was not in your message.".to_owned()
+            }
+            Ok(args) => match store.create_todo(&NewTodo {
+                title: args.title.trim().to_owned(),
+                notes: args.notes,
+                source: "donna_chat".to_owned(),
+                related_topic: args.related_topic,
+                severity: args.severity.unwrap_or_else(|| "middle".to_owned()),
+                due_at: None,
+            }) {
+                Ok(todo) => format!("Added todo: {}.", todo.title),
+                Err(error) => format!("I could not add that todo: {error}"),
+            },
+            Err(error) => format!("I could not read that todo tool call: {error}"),
+        },
+        "complete_todo" => match CompleteTodoArgs::from_call(&call) {
+            Ok(args) => match store.update_todo_status(args.todo_id, "done") {
+                Ok(todo) => format!("Marked '{}' done.", todo.title),
+                Err(error) => format!("I could not complete that todo: {error}"),
+            },
+            Err(error) => format!("I could not read that todo tool call: {error}"),
+        },
+        "delete_todo" => match CompleteTodoArgs::from_call(&call) {
+            Ok(args) => match store.delete_todo(args.todo_id) {
+                Ok(todo) => format!("Deleted todo: {}.", todo.title),
+                Err(error) => format!("I could not delete that todo: {error}"),
+            },
+            Err(error) => format!("I could not read that todo tool call: {error}"),
+        },
         "update_todo_severity" => {
-            let args = serde_json::from_value::<UpdateTodoSeverityArgs>(call.arguments);
+            let args = UpdateTodoSeverityArgs::from_call(&call);
             match args {
                 Ok(args) => match store.update_todo_severity(args.todo_id, &args.severity) {
                     Ok(todo) => format!("Set '{}' to {} priority.", todo.title, todo.severity),
@@ -846,10 +925,115 @@ fn execute_tool_call_from_model(store: Option<&LocalStore>, text: &str) -> Optio
             }
         }
         _ => "I do not know that local tool.".to_owned(),
+    }
+}
+
+impl CompleteTodoArgs {
+    fn from_call(call: &ModelToolCall) -> Result<Self, String> {
+        let arguments = normalized_call_arguments(call);
+        let todo_id = i64_argument(&arguments, &["todo_id", "id"])
+            .ok_or_else(|| "missing todo_id".to_owned())?;
+        Ok(Self { todo_id })
+    }
+}
+
+impl UpdateTodoSeverityArgs {
+    fn from_call(call: &ModelToolCall) -> Result<Self, String> {
+        let arguments = normalized_call_arguments(call);
+        let todo_id = i64_argument(&arguments, &["todo_id", "id"])
+            .ok_or_else(|| "missing todo_id".to_owned())?;
+        let severity = string_argument(&arguments, &["severity", "priority"])
+            .ok_or_else(|| "missing severity".to_owned())?;
+        Ok(Self { todo_id, severity })
+    }
+}
+
+impl CreateTodoArgs {
+    fn from_call(call: &ModelToolCall) -> Result<Self, String> {
+        let arguments = normalized_call_arguments(call);
+        let title = string_argument(&arguments, &["title", "task", "todo"])
+            .ok_or_else(|| "missing title".to_owned())?;
+        Ok(Self {
+            title,
+            severity: string_argument(&arguments, &["severity", "priority"]),
+            notes: string_argument(&arguments, &["notes", "note"]),
+            related_topic: string_argument(&arguments, &["related_topic", "topic"]),
+        })
+    }
+}
+
+fn normalize_tool_name(tool: &str) -> String {
+    match tool.trim().to_ascii_lowercase().as_str() {
+        "add_todo" | "new_todo" => "create_todo".to_owned(),
+        "done_todo" | "mark_todo_done" | "mark_done" | "complete_task" => {
+            "complete_todo".to_owned()
+        }
+        "remove_todo" | "dismiss_todo" | "delete_task" | "remove_task" => "delete_todo".to_owned(),
+        "set_todo_severity" | "set_todo_priority" | "update_todo_priority" => {
+            "update_todo_severity".to_owned()
+        }
+        "completed_todo"
+        | "completed_todos"
+        | "done_todos"
+        | "list_completed_todo"
+        | "list_done_todo"
+        | "list_done_todos"
+        | "any_completed_todo"
+        | "any_completed_todos" => "list_completed_todos".to_owned(),
+        "list_todos" | "show_todos" => "list_open_todos".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn normalized_call_arguments(call: &ModelToolCall) -> serde_json::Map<String, serde_json::Value> {
+    if let Some(arguments) = object_from_value(&call.arguments) {
+        return arguments;
+    }
+
+    call.extra
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "tool" | "name" | "function"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn object_from_value(
+    value: &serde_json::Value,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match value {
+        serde_json::Value::Object(object) if !object.is_empty() => Some(object.clone()),
+        serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .and_then(|value| object_from_value(&value)),
+        _ => None,
+    }
+}
+
+fn i64_argument(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    names: &[&str],
+) -> Option<i64> {
+    names.iter().find_map(|name| match arguments.get(*name)? {
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
     })
 }
 
-fn parse_model_tool_call(text: &str) -> Option<ModelToolCall> {
+fn string_argument(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    names: &[&str],
+) -> Option<String> {
+    names.iter().find_map(|name| match arguments.get(*name)? {
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        _ => None,
+    })
+}
+
+fn parse_model_tool_calls(text: &str) -> Option<Vec<ModelToolCall>> {
     let trimmed = text.trim();
     let json = trimmed
         .strip_prefix("```json")
@@ -862,12 +1046,17 @@ fn parse_model_tool_call(text: &str) -> Option<ModelToolCall> {
         .unwrap_or(trimmed)
         .trim();
 
-    serde_json::from_str(json)
+    parse_tool_calls_json(json)
         .ok()
-        .or_else(|| parse_embedded_model_tool_call(json))
+        .or_else(|| parse_embedded_model_tool_calls(json))
 }
 
-fn parse_embedded_model_tool_call(text: &str) -> Option<ModelToolCall> {
+fn parse_tool_calls_json(json: &str) -> Result<Vec<ModelToolCall>, serde_json::Error> {
+    serde_json::from_str::<Vec<ModelToolCall>>(json)
+        .or_else(|_| serde_json::from_str::<ModelToolCall>(json).map(|call| vec![call]))
+}
+
+fn parse_embedded_model_tool_calls(text: &str) -> Option<Vec<ModelToolCall>> {
     let bytes = text.as_bytes();
     let mut start = None;
     let mut depth = 0usize;
@@ -899,8 +1088,8 @@ fn parse_embedded_model_tool_call(text: &str) -> Option<ModelToolCall> {
                 if depth == 0 {
                     let object_start = start?;
                     let candidate = &text[object_start..=index];
-                    if let Ok(call) = serde_json::from_str(candidate) {
-                        return Some(call);
+                    if let Ok(calls) = parse_tool_calls_json(candidate) {
+                        return Some(calls);
                     }
                     start = None;
                 }
@@ -910,6 +1099,72 @@ fn parse_embedded_model_tool_call(text: &str) -> Option<ModelToolCall> {
     }
 
     None
+}
+
+fn title_is_grounded_in_user_message(title: &str, user_message: &str) -> bool {
+    let title_words = significant_words(title);
+    if title_words.is_empty() {
+        return false;
+    }
+    let message_words = significant_words(user_message);
+
+    title_words.iter().all(|word| message_words.contains(word))
+}
+
+fn significant_words(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|word| word.len() > 2)
+        .map(str::to_ascii_lowercase)
+        .filter(|word| {
+            !matches!(
+                word.as_str(),
+                "the"
+                    | "and"
+                    | "that"
+                    | "this"
+                    | "todo"
+                    | "task"
+                    | "done"
+                    | "must"
+                    | "today"
+                    | "tomorrow"
+                    | "soon"
+                    | "urgent"
+                    | "important"
+                    | "priority"
+                    | "add"
+                    | "new"
+            )
+        })
+        .collect()
+}
+
+fn humanize_model_todo_leak(store: Option<&LocalStore>, text: String) -> String {
+    if !looks_like_raw_todo_context(&text) {
+        return text;
+    }
+    let Some(store) = store else {
+        return "I cannot see a local todo store right now.".to_owned();
+    };
+
+    match store.open_todos(20) {
+        Ok(todos) => format_tool_todo_list(&todos),
+        Err(error) => format!("I cannot read your todos: {error}"),
+    }
+}
+
+fn looks_like_raw_todo_context(text: &str) -> bool {
+    let mut raw_lines = 0;
+    for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("- ").unwrap_or(line).trim_start();
+        if line.starts_with("id=") && line.contains("title=") {
+            raw_lines += 1;
+        }
+    }
+
+    raw_lines > 0
 }
 
 fn format_tool_todo_list(todos: &[StoredTodo]) -> String {
@@ -930,6 +1185,23 @@ fn format_tool_todo_list(todos: &[StoredTodo]) -> String {
         answer.push_str(" (");
         answer.push_str(&todo.severity);
         answer.push_str(" priority)\n");
+    }
+    answer.trim_end().to_owned()
+}
+
+fn format_completed_todo_list(todos: &[StoredTodo]) -> String {
+    if todos.is_empty() {
+        return "You have no completed todos.".to_owned();
+    }
+    if todos.len() == 1 {
+        return format!("You have one completed todo: {}.", todos[0].title);
+    }
+
+    let mut answer = format!("You have {} completed todos:\n", todos.len());
+    for todo in todos {
+        answer.push_str("- ");
+        answer.push_str(&todo.title);
+        answer.push('\n');
     }
     answer.trim_end().to_owned()
 }

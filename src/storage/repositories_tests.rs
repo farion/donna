@@ -44,6 +44,10 @@ fn stores_basic_records_and_state() {
             .status,
         "done"
     );
+    assert_eq!(
+        store.delete_todo(todo.id).expect("delete todo").status,
+        "dismissed"
+    );
 
     let person = store
         .create_person(&NewPerson {

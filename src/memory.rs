@@ -45,17 +45,6 @@ impl MemoryExtractor {
 
         let mut extraction = MemoryExtraction::default();
 
-        if let Some(title) = extract_todo_title(message) {
-            extraction.todos.push(NewTodo {
-                severity: classify_todo_severity(&title).to_owned(),
-                title,
-                notes: None,
-                source: CHAT_SOURCE.to_owned(),
-                related_topic: extract_topic(message),
-                due_at: None,
-            });
-        }
-
         if let Some(meeting) = extract_meeting_memory(message) {
             if let Some(person) = extract_meeting_person(&meeting) {
                 extraction.people.push(NewPerson {
@@ -283,51 +272,6 @@ impl PersistedExtraction {
     }
 }
 
-fn extract_todo_title(message: &str) -> Option<String> {
-    if is_question(message) {
-        return None;
-    }
-
-    extract_after(
-        message,
-        &["todo:", "remember to ", "need to ", "must ", "have to "],
-    )
-    .map(clean_clause)
-    .filter(|title| !title.is_empty())
-}
-
-fn is_question(message: &str) -> bool {
-    let lower = message.trim_start().to_ascii_lowercase();
-    message.trim_end().ends_with('?')
-        || ["what ", "when ", "where ", "why ", "how ", "which ", "who "]
-            .iter()
-            .any(|prefix| lower.starts_with(prefix))
-}
-
-fn classify_todo_severity(title: &str) -> &'static str {
-    let lower = title.to_ascii_lowercase();
-    if [
-        "urgent",
-        "asap",
-        "critical",
-        "important",
-        "deadline",
-        "overdue",
-    ]
-    .iter()
-    .any(|word| lower.contains(word))
-    {
-        "high"
-    } else if ["someday", "maybe", "nice to", "optional"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "low"
-    } else {
-        "middle"
-    }
-}
-
 fn extract_meeting_memory(message: &str) -> Option<String> {
     extract_after(message, &["meeting with ", "met with "])
         .map(clean_clause)
@@ -350,12 +294,6 @@ fn extract_meeting_person(meeting: &str) -> Option<String> {
     } else {
         Some(candidate.to_owned())
     }
-}
-
-fn extract_topic(message: &str) -> Option<String> {
-    extract_after(message, &[" about ", " regarding "])
-        .map(clean_clause)
-        .filter(|topic| !topic.is_empty())
 }
 
 fn extract_after<'a>(message: &'a str, patterns: &[&str]) -> Option<&'a str> {
@@ -413,12 +351,11 @@ mod tests {
 
         let extraction = extractor.extract_user_message(raw);
 
-        assert_eq!(extraction.todos[0].title, "write a concept");
         assert_eq!(extraction.memories[0].memory_type, "meeting");
         assert_eq!(extraction.memories[0].source, "donna_chat");
         assert_eq!(extraction.people[0].display_name, "Anna");
         assert_ne!(extraction.memories[0].content, raw);
-        assert_ne!(extraction.todos[0].title, raw);
+        assert!(extraction.todos.is_empty());
     }
 
     #[test]
@@ -443,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn persists_only_structured_memory_and_todo_records() {
+    fn persists_only_structured_memory_records_from_chat() {
         let extractor = MemoryExtractor::from_config(&MemoryConfig::default());
         let store = LocalStore::in_memory().expect("store");
         let extraction =
@@ -458,18 +395,21 @@ mod tests {
             .expect("persist");
 
         let memory = store.memory(persisted.memory_ids[0]).expect("memory");
-        let todo = store.todo(persisted.todo_ids[0]).expect("todo");
 
         assert_eq!(memory.source, "donna_chat");
-        assert_eq!(todo.source, "donna_chat");
+        assert!(persisted.todo_ids.is_empty());
         assert_ne!(
             memory.content,
             "I prefer short updates and need to file receipts"
         );
-        assert_ne!(
-            todo.title,
-            "I prefer short updates and need to file receipts"
-        );
+    }
+
+    #[test]
+    fn generic_todo_update_phrases_do_not_create_new_todos() {
+        let extractor = MemoryExtractor::from_config(&MemoryConfig::default());
+        let extraction = extractor.extract_user_message("that must be done today");
+
+        assert!(extraction.todos.is_empty());
     }
 
     #[test]

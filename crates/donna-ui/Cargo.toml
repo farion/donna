@@ -1,0 +1,24 @@
+[package]
+name = "donna-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+donna-ai.workspace = true
+donna-config.workspace = true
+donna-core.workspace = true
+donna-harness.workspace = true
+donna-integrations.workspace = true
+donna-storage.workspace = true
+eframe.workspace = true
+image.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ab_glyph.workspace = true
+egui_kittest.workspace = true
+epaint_default_fonts.workspace = true
+tempfile.workspace = true

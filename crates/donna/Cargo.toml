@@ -1,0 +1,15 @@
+[package]
+name = "donna"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+donna-config.workspace = true
+donna-integrations.workspace = true
+donna-storage.workspace = true
+donna-ui.workspace = true
+eframe.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

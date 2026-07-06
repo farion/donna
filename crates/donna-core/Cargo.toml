@@ -1,0 +1,8 @@
+[package]
+name = "donna-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+donna-config.workspace = true

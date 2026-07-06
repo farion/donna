@@ -106,8 +106,8 @@ Donna uses TOML for non-secret settings. On Linux the default config path is:
 ~/.config/donna/donna.toml
 ```
 
-Secrets do not belong in TOML. Store API keys and Microsoft tokens in OS secret
-storage and reference them by name from TOML.
+Secrets do not belong in TOML. Store API keys, OAuth tokens, and Microsoft tokens
+in OS secret storage and reference them by name from TOML.
 
 Example MVP config:
 
@@ -220,9 +220,19 @@ Supported provider families in the config model are:
 - `github-copilot-compatible`
 - `mock` for tests and internal development
 
-The MVP has a concrete Ollama request adapter. OpenAI-compatible and
-GitHub-Copilot-compatible entries can be configured and selected, but their HTTP
-adapters are not wired into normal chat yet.
+Donna has concrete chat adapters for Ollama and OpenAI-compatible chat
+completion endpoints. OpenAI-compatible and GitHub-Copilot-compatible entries can
+be authenticated, configured, selected, and used for normal chat.
+
+Run `donna --auth` to configure AI provider auth:
+
+- OpenAI defaults to ChatGPT Plus/Pro browser login using OpenAI OAuth and stores
+  token JSON in OS secret storage at `donna/openai`. The wizard also keeps a
+  manual API-key option.
+- GitHub Copilot opens GitHub device login in the browser, exchanges the GitHub
+  token for a Copilot token, and stores token JSON in OS secret storage at
+  `donna/github-copilot`.
+- Donna writes only model metadata and secret references to `donna.toml`.
 
 For local Ollama, keep the default model or edit it to match a model you have
 pulled:

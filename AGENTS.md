@@ -40,6 +40,14 @@ The assistant helps with chat, memories, todos, Microsoft Teams, Outlook, calend
 - Keep Donna chat session state in memory only.
 - Use a memory extraction layer to create durable records from chat.
 - Use an AI provider abstraction for Ollama, OpenAI-compatible APIs, and GitHub Copilot-compatible providers.
+- Keep `donna-harness` focused on AI/assistant orchestration: conversation flow, tool registry, tool schemas, model-facing tool descriptions, memory extraction flow, approval flow, and task execution flow.
+- `donna-harness` is not the executable launcher. The launcher binary wires CLI/runtime startup and depends on `donna-ui` and `donna-harness`.
+- Put AI tool implementations such as `create_todo`, `remember_fact`, search, and prepare/send workflows in `donna-harness`; keep provider HTTP/API details in the AI provider crate.
+- Each AI tool must have its own Rust source file in `donna-harness` and its own Markdown usage description under `assets/`.
+- Never put prompt text in Rust source code. Prompts, prompt preambles, tool descriptions, fallback prompts, and prompt templates must live in files under `assets/` and be loaded or embedded from there.
+- Tool behavior must be enforced in Rust. Markdown tool descriptions are prompt material only and must never be treated as executable policy.
+- Side-effecting external tools such as mail, Teams, calendar changes, and note writes must create approval requests and execute only after explicit approval.
+- Keep `donna-ui` focused on egui rendering and user interaction; it may call the harness but should not own assistant/tool orchestration.
 - Background tasks use a configured task model, not the currently selected UI chat model.
 - Task schedules use cron expressions.
 - Task prompts are Markdown files and must not execute code.
@@ -66,4 +74,5 @@ The assistant helps with chat, memories, todos, Microsoft Teams, Outlook, calend
 - Specs live in `SPEC/`.
 - User documentation lives in `docs/`.
 - Main user documentation file is `docs/usage.md`.
+- SQLite data model documentation lives in `docs/datamodel.md` and must be updated whenever migrations, persisted storage types, or durable record semantics change.
 - Architecture documentation lives in `architecture.md`.

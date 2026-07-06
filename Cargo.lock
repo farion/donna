@@ -757,6 +757,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "dbus"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b942602992bb7acfd1f51c49811c58a610ef9181b6e66f3e519d79b540a3bf73"
+dependencies = [
+ "libc",
+ "libdbus-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dbus-secret-service"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "708b509edf7889e53d7efb0ffadd994cc6c2345ccb62f55cfd6b0682165e4fa6"
+dependencies = [
+ "dbus",
+ "zeroize",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -836,21 +857,101 @@ dependencies = [
 name = "donna"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
- "directories",
+ "donna-config",
+ "donna-integrations",
+ "donna-storage",
+ "donna-ui",
  "eframe",
- "egui_kittest",
- "epaint_default_fonts",
- "image",
- "keyring",
+ "tempfile",
+]
+
+[[package]]
+name = "donna-ai"
+version = "0.1.0"
+dependencies = [
+ "donna-config",
+ "donna-core",
  "reqwest",
- "rpassword",
- "rusqlite",
- "rust-embed",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "donna-config"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "serde",
+ "tempfile",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "donna-core"
+version = "0.1.0"
+dependencies = [
+ "donna-config",
+]
+
+[[package]]
+name = "donna-harness"
+version = "0.1.0"
+dependencies = [
+ "donna-ai",
+ "donna-config",
+ "donna-core",
+ "donna-storage",
  "serde",
  "serde_json",
  "tempfile",
  "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "donna-integrations"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "donna-config",
+ "donna-storage",
+ "getrandom 0.3.4",
+ "keyring",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "donna-storage"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "donna-ui"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "donna-ai",
+ "donna-config",
+ "donna-core",
+ "donna-harness",
+ "donna-integrations",
+ "donna-storage",
+ "eframe",
+ "egui_kittest",
+ "epaint_default_fonts",
+ "image",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1874,6 +1975,7 @@ version = "3.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
 dependencies = [
+ "dbus-secret-service",
  "log",
  "zeroize",
 ]
@@ -1922,6 +2024,15 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libdbus-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
+dependencies = [
+ "pkg-config",
+]
 
 [[package]]
 name = "libloading"
@@ -5015,6 +5126,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zerotrie"

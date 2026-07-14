@@ -39,6 +39,7 @@ fn creates_and_reloads_default_config() {
     assert_eq!(loaded.ai.chat.selected_model, "openai-compatible");
     assert_eq!(loaded.data.database_path, dir.path().join("state.sqlite3"));
     assert!(loaded.offline.show_stale_data_warnings);
+    assert_eq!(loaded.microsoft.teams_activity_window_days, 90);
 }
 
 #[test]
@@ -85,15 +86,28 @@ fn invalid_config_falls_back_with_error_message() {
 fn serialized_config_keeps_secret_values_out_of_toml() {
     let mut config = AppConfig::default();
     config.microsoft.client_id = Some("client-id".to_owned());
+    config.microsoft.client_secret_ref = Some("donna/microsoft-client-secret".to_owned());
     config.microsoft.token_secret_ref = Some("donna/microsoft".to_owned());
 
     let contents = toml::to_string_pretty(&config).expect("serialize config");
 
     assert!(contents.contains("secret_ref = \"donna/openai\""));
     assert!(contents.contains("client_id = \"client-id\""));
+    assert!(contents.contains("client_secret_ref = \"donna/microsoft-client-secret\""));
     assert!(contents.contains("token_secret_ref = \"donna/microsoft\""));
     assert!(!contents.contains("api_key"));
     assert!(!contents.contains("access_token"));
     assert!(!contents.contains("refresh_token"));
     assert!(!contents.contains("password"));
+}
+
+#[test]
+fn missing_microsoft_teams_activity_window_uses_default() {
+    let contents = "\
+[microsoft]\n\
+tenant_id = \"common\"\n\
+";
+    let config = toml::from_str::<AppConfig>(contents).expect("legacy config");
+
+    assert_eq!(config.microsoft.teams_activity_window_days, 90);
 }

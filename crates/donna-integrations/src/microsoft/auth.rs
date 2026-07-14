@@ -1,28 +1,22 @@
+use crate::browser::open_url;
 use crate::microsoft::error::GraphError;
 use crate::secrets::SecretStore;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use donna_config::AppConfig;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::io::{self, Write};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const DEFAULT_TOKEN_SECRET_REF: &str = "donna/microsoft";
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct DeviceCodeResponse {
-    pub device_code: String,
-    pub user_code: String,
-    #[serde(alias = "verification_url")]
-    pub verification_uri: String,
-    pub verification_uri_complete: Option<String>,
-    pub expires_in: u64,
-    pub interval: Option<u64>,
-    pub message: String,
-}
+const DEFAULT_CLIENT_SECRET_REF: &str = "donna/microsoft-client-secret";
+const CALLBACK_PORT: u16 = 1467;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MicrosoftTokenSet {
@@ -34,12 +28,12 @@ pub struct MicrosoftTokenSet {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReqwestDeviceCodeClient {
+pub struct ReqwestAuthCodeClient {
     client: Client,
     tenant_id: String,
 }
 
-impl ReqwestDeviceCodeClient {
+impl ReqwestAuthCodeClient {
     pub fn new(tenant_id: impl Into<String>) -> Self {
         Self {
             client: Client::new(),
@@ -47,51 +41,24 @@ impl ReqwestDeviceCodeClient {
         }
     }
 
-    pub fn request_device_code(
+    pub fn exchange_code(
         &self,
         client_id: &str,
-        scopes: &[String],
-    ) -> Result<DeviceCodeResponse, GraphError> {
-        let scope = scopes.join(" ");
-        let response = self
-            .client
-            .post(device_code_url(&self.tenant_id))
-            .form(&[("client_id", client_id), ("scope", scope.as_str())])
-            .send()?;
-
-        parse_device_code_response(response)
-    }
-
-    pub fn poll_for_token(
-        &self,
-        client_id: &str,
-        device_code: &DeviceCodeResponse,
+        client_secret: &str,
+        redirect_uri: &str,
+        code: &str,
+        code_verifier: &str,
     ) -> Result<MicrosoftTokenSet, GraphError> {
-        let mut interval = Duration::from_secs(device_code.interval.unwrap_or(5).max(1));
-        let expires_at = Instant::now() + Duration::from_secs(device_code.expires_in);
-
-        loop {
-            if Instant::now() >= expires_at {
-                return Err(GraphError::Auth("device code expired".to_owned()));
-            }
-
-            thread::sleep(interval);
-            match self.poll_once(client_id, &device_code.device_code)? {
-                PollOutcome::Token(token) => return Ok(token),
-                PollOutcome::Pending => {}
-                PollOutcome::SlowDown => interval += Duration::from_secs(5),
-            }
-        }
-    }
-
-    fn poll_once(&self, client_id: &str, device_code: &str) -> Result<PollOutcome, GraphError> {
         let response = self
             .client
             .post(token_url(&self.tenant_id))
             .form(&[
-                ("grant_type", DEVICE_CODE_GRANT),
+                ("grant_type", "authorization_code"),
                 ("client_id", client_id),
-                ("device_code", device_code),
+                ("client_secret", client_secret),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", code_verifier),
             ])
             .send()?;
 
@@ -106,39 +73,64 @@ pub fn run_auth_wizard(
     let config_path = config_path.as_ref();
     let mut config = AppConfig::load_or_create_at(config_path)?;
 
-    let client_id = prompt_required(
-        "Microsoft app client id",
-        config.microsoft.client_id.as_deref(),
-    )?;
+    let application_id = prompt_required("Application id", config.microsoft.client_id.as_deref())?;
     let tenant_id = prompt_default("Tenant id", &config.microsoft.tenant_id)?;
-    let account_hint = prompt_optional("Account hint", config.microsoft.account_hint.as_deref())?;
-    let token_ref = prompt_default(
-        "Token secret reference",
-        config
-            .microsoft
-            .token_secret_ref
-            .as_deref()
-            .unwrap_or(DEFAULT_TOKEN_SECRET_REF),
-    )?;
+    let client_secret = prompt_required("Client secret", None)?;
+    let client_secret_ref = config
+        .microsoft
+        .client_secret_ref
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CLIENT_SECRET_REF.to_owned());
+    let token_ref = config
+        .microsoft
+        .token_secret_ref
+        .clone()
+        .unwrap_or_else(|| DEFAULT_TOKEN_SECRET_REF.to_owned());
+    let redirect_uri = format!("http://localhost:{CALLBACK_PORT}/auth/callback");
+    let pkce = generate_pkce()?;
+    let state = random_base64(32)?;
+    let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT)).map_err(|error| {
+        GraphError::Auth(format!(
+            "could not listen for Microsoft OAuth callback on {redirect_uri}: {error}"
+        ))
+    })?;
 
-    config.microsoft.client_id = Some(client_id.clone());
+    config.microsoft.client_id = Some(application_id.clone());
     config.microsoft.tenant_id = tenant_id.clone();
-    config.microsoft.account_hint = account_hint;
+    config.microsoft.client_secret_ref = Some(client_secret_ref.clone());
     config.microsoft.token_secret_ref = Some(token_ref.clone());
     config.save_to_path(config_path)?;
+    secret_store.set_secret(&client_secret_ref, &client_secret)?;
 
     println!(
         "Saved Microsoft account metadata to {}. No token values were written to TOML.",
         config_path.display()
     );
+    println!("Stored Microsoft client secret in OS secret storage at {client_secret_ref}.");
 
-    let client = ReqwestDeviceCodeClient::new(tenant_id);
-    let code = client.request_device_code(&client_id, &config.microsoft.scopes)?;
-    println!("{}", code.message);
-    println!("Verification URI: {}", code.verification_uri);
-    println!("User code: {}", code.user_code);
+    let authorize_url = authorize_url(
+        &tenant_id,
+        &application_id,
+        &config.microsoft.scopes,
+        &redirect_uri,
+        &pkce.challenge,
+        &state,
+    );
+    println!("Opening browser for Microsoft authorization: {authorize_url}");
+    if let Err(error) = open_url(&authorize_url) {
+        println!("{error}. Open this URL manually: {authorize_url}");
+    }
+    println!("Waiting for browser callback on {redirect_uri} ...");
 
-    let token = client.poll_for_token(&client_id, &code)?;
+    let code = wait_for_callback(listener, &state)?;
+    let client = ReqwestAuthCodeClient::new(tenant_id);
+    let token = client.exchange_code(
+        &application_id,
+        &client_secret,
+        &redirect_uri,
+        &code,
+        &pkce.verifier,
+    )?;
     store_microsoft_tokens(secret_store, &token_ref, &token)?;
     println!("Stored Microsoft Graph tokens in OS secret storage at {token_ref}.");
     Ok(())
@@ -170,45 +162,17 @@ pub fn load_microsoft_tokens(
         })
 }
 
-fn parse_device_code_response(
-    response: reqwest::blocking::Response,
-) -> Result<DeviceCodeResponse, GraphError> {
-    let status = response.status();
-    let body = response.text()?;
-
-    if status.is_success() {
-        return serde_json::from_str(&body)
-            .map_err(|error| GraphError::UnexpectedResponse(error.to_string()));
-    }
-
-    Err(parse_oauth_error(status, &body))
-}
-
-fn parse_token_response(response: reqwest::blocking::Response) -> Result<PollOutcome, GraphError> {
+fn parse_token_response(response: reqwest::blocking::Response) -> Result<MicrosoftTokenSet, GraphError> {
     let status = response.status();
     let body = response.text()?;
 
     if status.is_success() {
         let token: TokenSuccess = serde_json::from_str(&body)
             .map_err(|error| GraphError::UnexpectedResponse(error.to_string()))?;
-        return Ok(PollOutcome::Token(token.into_token_set()?));
+        return token.into_token_set();
     }
 
-    let error: OAuthError = serde_json::from_str(&body).unwrap_or_else(|_| OAuthError {
-        error: status.to_string(),
-        error_description: Some(body),
-    });
-
-    match error.error.as_str() {
-        "authorization_pending" => Ok(PollOutcome::Pending),
-        "slow_down" => Ok(PollOutcome::SlowDown),
-        "authorization_declined" => Err(GraphError::Auth("authorization declined".to_owned())),
-        "expired_token" => Err(GraphError::Auth("device code expired".to_owned())),
-        _ => Err(GraphError::auth_error(
-            &error.error,
-            error.error_description.as_deref(),
-        )),
-    }
+    Err(parse_oauth_error(status, &body))
 }
 
 fn parse_oauth_error(status: StatusCode, body: &str) -> GraphError {
@@ -241,20 +205,6 @@ fn prompt_default(label: &str, default: &str) -> Result<String, GraphError> {
     }
 }
 
-fn prompt_optional(label: &str, default: Option<&str>) -> Result<Option<String>, GraphError> {
-    let prompt_label = match default {
-        Some(default) => format!("{label} [{default}]"),
-        None => label.to_owned(),
-    };
-    let value = prompt(&prompt_label)?;
-
-    if value.trim().is_empty() {
-        Ok(default.map(str::to_owned))
-    } else {
-        Ok(Some(value))
-    }
-}
-
 fn prompt(label: &str) -> Result<String, GraphError> {
     print!("{label}: ");
     io::stdout().flush()?;
@@ -263,12 +213,171 @@ fn prompt(label: &str) -> Result<String, GraphError> {
     Ok(value.trim().to_owned())
 }
 
-fn device_code_url(tenant_id: &str) -> String {
-    format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/devicecode")
+fn authorize_url(
+    tenant_id: &str,
+    client_id: &str,
+    scopes: &[String],
+    redirect_uri: &str,
+    code_challenge: &str,
+    state: &str,
+) -> String {
+    let scope = scopes.join(" ");
+    let params = [
+        ("client_id", client_id),
+        ("response_type", "code"),
+        ("redirect_uri", redirect_uri),
+        ("response_mode", "query"),
+        ("scope", scope.as_str()),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", "S256"),
+        ("state", state),
+    ];
+    let query = params
+        .iter()
+        .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize?{query}")
 }
 
 fn token_url(tenant_id: &str) -> String {
     format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token")
+}
+
+fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String, GraphError> {
+    let (mut stream, _) = listener
+        .accept()
+        .map_err(|error| GraphError::Auth(format!("failed to receive OAuth callback: {error}")))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|error| GraphError::Auth(error.to_string()))?;
+    let request = read_http_request(&mut stream)?;
+    let request_line = request
+        .lines()
+        .next()
+        .ok_or_else(|| GraphError::Auth("empty OAuth callback request".to_owned()))?;
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| GraphError::Auth("invalid OAuth callback request".to_owned()))?;
+    let (_, query) = path
+        .split_once('?')
+        .ok_or_else(|| GraphError::Auth("OAuth callback had no query string".to_owned()))?;
+    let params = parse_query(query);
+
+    if let Some(error) = params
+        .get("error_description")
+        .or_else(|| params.get("error"))
+    {
+        write_callback_response(&mut stream, false, error);
+        return Err(GraphError::Auth(error.clone()));
+    }
+    if params.get("state").map(String::as_str) != Some(expected_state) {
+        write_callback_response(&mut stream, false, "Invalid OAuth state");
+        return Err(GraphError::Auth("invalid OAuth state".to_owned()));
+    }
+    let code = params
+        .get("code")
+        .cloned()
+        .ok_or_else(|| GraphError::Auth("OAuth callback did not include a code".to_owned()))?;
+    write_callback_response(
+        &mut stream,
+        true,
+        "Donna can now use Microsoft Graph auth. You may close this tab.",
+    );
+    Ok(code)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<String, GraphError> {
+    let mut buffer = [0u8; 4096];
+    let mut request = Vec::new();
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| GraphError::Auth(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() > 16 * 1024 {
+            break;
+        }
+    }
+    String::from_utf8(request).map_err(|error| GraphError::Auth(error.to_string()))
+}
+
+fn write_callback_response(stream: &mut TcpStream, success: bool, message: &str) {
+    let title = if success {
+        "Authorization complete"
+    } else {
+        "Authorization failed"
+    };
+    let status = if success { "200 OK" } else { "400 Bad Request" };
+    let body = format!("<html><body><h1>{title}</h1><p>{message}</p></body></html>");
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn generate_pkce() -> Result<Pkce, GraphError> {
+    let verifier = random_base64(32)?;
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    Ok(Pkce {
+        verifier,
+        challenge,
+    })
+}
+
+fn random_base64(length: usize) -> Result<String, GraphError> {
+    let mut bytes = vec![0u8; length];
+    getrandom::fill(&mut bytes).map_err(|error| GraphError::Auth(error.to_string()))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn parse_query(query: &str) -> HashMap<String, String> {
+    query
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((percent_decode(key), percent_decode(value)))
+        })
+        .collect()
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                output.push(hex);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 fn now_seconds() -> Result<i64, GraphError> {
@@ -276,10 +385,9 @@ fn now_seconds() -> Result<i64, GraphError> {
     Ok(elapsed.as_secs() as i64)
 }
 
-enum PollOutcome {
-    Pending,
-    SlowDown,
-    Token(MicrosoftTokenSet),
+struct Pkce {
+    verifier: String,
+    challenge: String,
 }
 
 #[derive(Deserialize)]

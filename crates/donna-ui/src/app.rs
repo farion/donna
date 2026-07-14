@@ -16,12 +16,14 @@ use donna_harness::tasks::{
 use donna_harness::tools::{
     execute_tool_call_from_model, humanize_model_todo_leak, local_tool_prompt,
 };
+use donna_integrations::microsoft::background_sync::run_sync_once as run_microsoft_sync_once;
 use donna_integrations::secrets::{KeyringSecretStore, SecretStore};
 use donna_storage::{LocalStore, StoredMemory};
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontId, Key, Layout, RichText, ScrollArea, Sense,
     UiBuilder, Vec2,
 };
+use egui_phosphor::Variant as PhosphorVariant;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -67,6 +69,10 @@ pub struct DonnaApp {
     task_runner_state: TaskRunnerState,
     task_definitions: Vec<TaskDefinition>,
     last_task_check_minute: Option<i64>,
+    last_microsoft_sync_minute: Option<i64>,
+    microsoft_sync_in_progress: bool,
+    microsoft_sync_status: MicrosoftSyncUiStatus,
+    microsoft_sync_receiver: Option<Receiver<Result<(), String>>>,
     input: String,
     input_history: Vec<String>,
     input_history_cursor: Option<usize>,
@@ -97,6 +103,13 @@ struct StreamingResponse {
     text: String,
     placeholder: String,
     user_message: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MicrosoftSyncUiStatus {
+    outlook_percent: u8,
+    teams_percent: u8,
+    calendar_percent: u8,
 }
 
 enum ChatWorkerEvent {
@@ -163,6 +176,7 @@ impl DonnaApp {
         wakeup_receiver: Option<Arc<Mutex<Receiver<IpcEvent>>>>,
     ) -> Self {
         let (mut config, config_notice) = AppConfig::load_or_default_at(&config_path);
+        Self::install_phosphor_icons(&creation.egui_ctx);
         let (store, storage_notice) = match LocalStore::open(&config.data.database_path) {
             Ok(store) => (Some(store), None),
             Err(error) => (None, Some(error.to_string())),
@@ -183,8 +197,7 @@ impl DonnaApp {
                 Vec::new()
             }
         };
-
-        Self {
+        let mut app = Self {
             config_path,
             memory_extractor: MemoryExtractor::from_config(&config.memory),
             config,
@@ -194,6 +207,10 @@ impl DonnaApp {
             task_runner_state: TaskRunnerState::running(),
             task_definitions,
             last_task_check_minute: None,
+            last_microsoft_sync_minute: unix_now_seconds().map(|seconds| seconds / 60),
+            microsoft_sync_in_progress: false,
+            microsoft_sync_status: MicrosoftSyncUiStatus::default(),
+            microsoft_sync_receiver: None,
             sensitive_memory_reviews: memory_review::SensitiveMemoryReviews::default(),
             input: String::new(),
             input_history: Vec::new(),
@@ -217,7 +234,9 @@ impl DonnaApp {
             last_idle_change: Instant::now(),
             hide_requested,
             wakeup_receiver,
-        }
+        };
+        app.trigger_microsoft_sync("startup");
+        app
     }
 
     fn cycle_model(&mut self) {
@@ -735,6 +754,98 @@ impl DonnaApp {
         self.run_due_local_tasks_at(now, cron_datetime_from_unix(now));
     }
 
+    fn run_due_microsoft_sync(&mut self) {
+        if self.store.is_none() {
+            return;
+        }
+        let Some(now) = unix_now_seconds() else {
+            return;
+        };
+        let minute_key = now / 60;
+        if self.last_microsoft_sync_minute == Some(minute_key) {
+            return;
+        }
+        self.last_microsoft_sync_minute = Some(minute_key);
+        self.trigger_microsoft_sync(&format!("minute={minute_key}"));
+    }
+
+    fn trigger_microsoft_sync(&mut self, reason: &str) {
+        if self.microsoft_sync_in_progress {
+            eprintln!("donna ui: Microsoft sync already running, skip trigger ({reason})");
+            return;
+        }
+        eprintln!("donna ui: triggering Microsoft sync ({reason})");
+        let config = self.config.clone();
+        let database_path = config.data.database_path.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.microsoft_sync_receiver = Some(receiver);
+        self.microsoft_sync_in_progress = true;
+        thread::spawn(move || {
+            let result = LocalStore::open(&database_path)
+                .map_err(|error| format!("storage unavailable: {error}"))
+                .and_then(|store| {
+                    run_microsoft_sync_once(&store, &config, &KeyringSecretStore::default())
+                        .map_err(|error| error.to_string())
+                });
+            let _ = sender.send(result);
+        });
+    }
+
+    fn poll_microsoft_sync_worker(&mut self) {
+        self.refresh_microsoft_sync_status();
+        let Some(receiver) = self.microsoft_sync_receiver.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err("Microsoft sync worker disconnected".to_owned()))
+            }
+        };
+
+        if let Some(result) = result {
+            self.microsoft_sync_in_progress = false;
+            self.microsoft_sync_receiver = None;
+            self.refresh_microsoft_sync_status();
+            match result {
+                Ok(()) => eprintln!("donna ui: Microsoft sync worker finished"),
+                Err(error) => {
+                    eprintln!("donna ui: Microsoft sync worker failed: {error}");
+                    self.config_notice = Some(error);
+                }
+            }
+        }
+    }
+
+    fn refresh_microsoft_sync_status(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            self.microsoft_sync_status = MicrosoftSyncUiStatus::default();
+            return;
+        };
+
+        self.microsoft_sync_status = MicrosoftSyncUiStatus {
+            outlook_percent: Self::runtime_percent(store, "microsoft.sync.progress.outlook"),
+            teams_percent: Self::runtime_percent(store, "microsoft.sync.progress.teams"),
+            calendar_percent: Self::runtime_percent(store, "microsoft.sync.progress.calendar"),
+        };
+    }
+
+    fn runtime_percent(store: &LocalStore, key: &str) -> u8 {
+        store
+            .runtime_state(key)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or(0)
+    }
+
+    fn install_phosphor_icons(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, PhosphorVariant::Regular);
+        ctx.set_fonts(fonts);
+    }
+
     fn run_due_local_tasks_at(&mut self, now: i64, at: CronDateTime) {
         for task in self.task_definitions.clone() {
             if !task.enabled || !task.schedule.matches(at) {
@@ -932,6 +1043,8 @@ impl eframe::App for DonnaApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_wakeup_ipc(ctx);
         self.poll_chat_worker(ctx);
+        self.poll_microsoft_sync_worker();
+        self.run_due_microsoft_sync();
         self.run_due_local_tasks();
         if self.input.trim_start().starts_with('/')
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Enter))
@@ -1088,6 +1201,19 @@ impl DonnaApp {
         chat_ui.set_clip_rect(inner_rect);
         chat_ui.set_width(inner_size.x);
         chat_ui.set_height(inner_size.y);
+
+        let activity_rect = egui::Rect::from_min_size(
+            egui::pos2((inner_rect.right() - 84.0).max(inner_rect.left()), inner_rect.top()),
+            Vec2::new(84.0, 18.0),
+        );
+        let mut activity_ui = ui.new_child(
+            UiBuilder::new()
+                .id_salt("chat-activity-strip")
+                .max_rect(activity_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        activity_ui.set_clip_rect(inner_rect);
+        self.render_activity_strip(&mut activity_ui, false);
 
         let input_height = chat_bar_reserved_height(inner_size.x, &self.input, Some(ctx));
         let attention_height = if self.attention.has_active_item() {

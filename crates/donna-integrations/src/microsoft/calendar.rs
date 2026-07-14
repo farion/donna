@@ -6,6 +6,9 @@ use donna_storage::{CalendarEvent, LocalStore, NewCalendarEvent, NewTaskFinding,
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CALENDAR_SOURCE: &str = "calendar";
+const CALENDAR_LOOKBACK_DAYS: i64 = 90;
+const CALENDAR_LOOKAHEAD_DAYS: i64 = 90;
+const DAY_SECONDS: i64 = 86_400;
 
 pub trait CalendarGraphClient {
     fn sync_events(
@@ -64,12 +67,17 @@ where
     C: CalendarGraphClient,
 {
     pub fn sync_events(&self, store: &LocalStore) -> Result<SyncReport, GraphError> {
-        run_sync(
+        let report = run_sync(
             store,
             CALENDAR_SOURCE,
             |delta_link| self.client.sync_events(delta_link),
             |event| store.upsert_calendar_event(event).map(|_| ()),
-        )
+        )?;
+        let now = now_seconds()?;
+        let range_start = now - (CALENDAR_LOOKBACK_DAYS * DAY_SECONDS);
+        let range_end = now + (CALENDAR_LOOKAHEAD_DAYS * DAY_SECONDS);
+        let _ = store.prune_calendar_events_outside_range(range_start, range_end)?;
+        Ok(report)
     }
 
     pub fn create_event(

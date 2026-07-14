@@ -6,6 +6,8 @@ use donna_storage::{LocalStore, NewOutlookMessage};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const OUTLOOK_MAIL_SOURCE: &str = "outlook.mail";
+const MAIL_LOOKBACK_DAYS: i64 = 90;
+const DAY_SECONDS: i64 = 86_400;
 
 pub trait OutlookGraphClient {
     fn sync_mail(
@@ -40,12 +42,15 @@ where
     C: OutlookGraphClient,
 {
     pub fn sync_mail(&self, store: &LocalStore) -> Result<SyncReport, GraphError> {
-        run_sync(
+        let report = run_sync(
             store,
             OUTLOOK_MAIL_SOURCE,
             |delta_link| self.client.sync_mail(delta_link),
             |message| store.upsert_outlook_message(message).map(|_| ()),
-        )
+        )?;
+        let cutoff = now_seconds()? - (MAIL_LOOKBACK_DAYS * DAY_SECONDS);
+        let _ = store.prune_outlook_messages_before(cutoff)?;
+        Ok(report)
     }
 
     pub fn send_mail(

@@ -51,6 +51,15 @@ impl LocalStore {
             .map_err(StorageError::from)
     }
 
+    pub fn running_task_run_count(&self) -> Result<usize, StorageError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM task_runs WHERE status = 'running' AND finished_at IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     pub fn create_task_finding(&self, input: &NewTaskFinding) -> Result<TaskFinding, StorageError> {
         let created_at = now_seconds()?;
         self.connection.execute(

@@ -12,6 +12,7 @@ donna-harness.workspace = true
 donna-integrations.workspace = true
 donna-storage.workspace = true
 eframe.workspace = true
+egui-phosphor.workspace = true
 image.workspace = true
 rust-embed.workspace = true
 serde.workspace = true

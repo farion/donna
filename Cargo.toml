@@ -20,6 +20,7 @@ license = "MIT"
 ab_glyph = "0.2"
 directories = "6"
 eframe = "0.34"
+egui-phosphor = "0.12"
 egui_kittest = { version = "0.34", features = ["eframe"] }
 epaint_default_fonts = "0.34"
 getrandom = "0.3"

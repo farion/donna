@@ -1,6 +1,7 @@
 use super::ui_style::palette_for;
 use super::{DonnaApp, status};
 use eframe::egui::{self, Align, FontId, Key, Label, Layout, Margin, RichText, TextEdit};
+use egui_phosphor::regular::{CIRCLE_NOTCH, MICROSOFT_TEAMS_LOGO};
 
 const COMPACT_CHAT_BAR_WIDTH: f32 = 180.0;
 const COMPACT_CHAT_BAR_HEIGHT: f32 = 88.0;
@@ -69,6 +70,26 @@ impl DonnaApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(chat_bar_text(model_label, palette.notice_text));
             });
+        });
+    }
+
+    pub(super) fn render_activity_strip(&self, ui: &mut egui::Ui, compact: bool) {
+        let palette = palette_for(ui.ctx().theme());
+        let icon_size = if compact { 13.0 } else { 14.0 };
+        let task_running = self
+            .store
+            .as_ref()
+            .and_then(|store| store.running_task_run_count().ok())
+            .unwrap_or(0);
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if self.microsoft_sync_in_progress {
+                ui.label(activity_icon(MICROSOFT_TEAMS_LOGO, palette.notice_text, icon_size));
+            }
+            if task_running > 0 {
+                ui.label(activity_icon(CIRCLE_NOTCH, palette.notice_text, icon_size));
+            }
         });
     }
 
@@ -181,5 +202,11 @@ fn keep_tab_in_chat_input(ui: &mut egui::Ui, response: &egui::Response) {
 fn chat_bar_text(text: impl Into<String>, color: egui::Color32) -> RichText {
     RichText::new(text)
         .font(FontId::proportional(13.0))
+        .color(color)
+}
+
+fn activity_icon(icon: &str, color: egui::Color32, size: f32) -> RichText {
+    RichText::new(icon)
+        .font(FontId::proportional(size))
         .color(color)
 }

@@ -433,6 +433,14 @@ impl LocalStore {
             .is_some_and(|value| value == "true"))
     }
 
+    pub fn set_runtime_state(&self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.set_local_state(key, value)
+    }
+
+    pub fn runtime_state(&self, key: &str) -> Result<Option<String>, StorageError> {
+        self.local_state(key)
+    }
+
     fn set_local_state(&self, key: &str, value: &str) -> Result<(), StorageError> {
         let now = now_seconds()?;
         self.connection.execute(

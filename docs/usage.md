@@ -151,6 +151,7 @@ secret_ref = "donna/github-copilot"
 
 [microsoft]
 tenant_id = "common"
+teams_activity_window_days = 90
 scopes = [
   "User.Read",
   "offline_access",
@@ -331,14 +332,21 @@ donna --auth
 
 The wizard asks for:
 
-- Microsoft app client id
+- application id
 - tenant id, defaulting to `common`
-- optional account hint
-- token secret reference, defaulting to `donna/microsoft`
+- client secret
+
+Donna stores the Microsoft client secret in OS secret storage under
+`donna/microsoft-client-secret` by default.
 
 Donna saves only non-secret Microsoft metadata to `donna.toml`. It then starts
-delegated device-code auth, shows Microsoft's verification URL and user code,
-polls for the token, and stores token JSON in OS secret storage.
+delegated authorization-code auth with PKCE, opens the browser for sign-in,
+waits for the localhost callback, exchanges the auth code for tokens, and
+stores token JSON in OS secret storage under `donna/microsoft`.
+
+`[microsoft].teams_activity_window_days` limits Teams sync to chats and channel
+messages with activity inside that window. The default is `90`. Set a smaller
+value to reduce sync time further. Set `0` to remove the activity filter.
 
 Default Graph scopes:
 
@@ -365,6 +373,24 @@ The MVP includes adapter foundations for:
 - Outlook mail sync and approved send-mail actions.
 - Teams chat and channel sync plus approved send-message actions.
 - Calendar sync, collision checks, and approved create/update/delete actions.
+
+Microsoft sync cadence:
+
+- one sync immediately on app startup
+- delta sync every minute while UI is running
+- delta sync every minute while Donna is hidden/background daemon
+
+Default sync retention windows:
+
+- Outlook mail: keep and use the last 90 days.
+- Teams chat and channel messages: keep and use the last 90 days.
+- Calendar events: keep and use from last 90 days through next 90 days.
+
+The local model tool layer can use synced Microsoft data for prompt-grounded
+answers such as:
+
+- concise summaries of recent Teams discussion with a named person
+- a list of tomorrow's appointments from synced calendar events
 
 Synced Microsoft content is stored locally in SQLite with external ids, sync
 state, deletion flags, and search records. Microsoft, calendar, mail, Teams, and

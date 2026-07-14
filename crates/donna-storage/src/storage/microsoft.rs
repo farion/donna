@@ -3,7 +3,8 @@ use crate::storage::types::{
     CalendarEvent, NewCalendarEvent, NewOutlookMessage, NewTeamsMessage, OutlookMessage,
     TeamsMessage,
 };
-use rusqlite::{Row, params};
+use rusqlite::types::Value;
+use rusqlite::{Row, params, params_from_iter};
 
 impl LocalStore {
     pub fn upsert_outlook_message(
@@ -242,6 +243,426 @@ impl LocalStore {
 
         let events = statement
             .query_map(params![starts_at, ends_at], calendar_event_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
+    pub fn prune_outlook_messages_before(&self, cutoff_received_at: i64) -> Result<usize, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM outlook_messages
+             WHERE received_at IS NOT NULL
+                AND received_at < ?1",
+        )?;
+        let ids = statement
+            .query_map([cutoff_received_at], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for id in &ids {
+            self.delete_search_record("outlook_message", *id)?;
+        }
+
+        self.connection.execute(
+            "DELETE FROM outlook_messages
+             WHERE received_at IS NOT NULL
+                AND received_at < ?1",
+            [cutoff_received_at],
+        )?;
+        Ok(ids.len())
+    }
+
+    pub fn prune_teams_messages_before(&self, cutoff_sent_at: i64) -> Result<usize, StorageError> {
+        let pruned = self.connection.execute(
+            "DELETE FROM search_index
+             WHERE record_type = 'teams_message'
+                AND record_id IN (
+                    SELECT id FROM teams_messages
+                    WHERE sent_at IS NOT NULL
+                       AND sent_at < ?1
+                )",
+            [cutoff_sent_at],
+        )?;
+
+        self.connection.execute(
+            "DELETE FROM teams_messages
+             WHERE sent_at IS NOT NULL
+                AND sent_at < ?1",
+            [cutoff_sent_at],
+        )?;
+        Ok(pruned)
+    }
+
+    pub fn prune_calendar_events_outside_range(
+        &self,
+        starts_after_or_at: i64,
+        ends_before_or_at: i64,
+    ) -> Result<usize, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM calendar_events
+             WHERE ends_at < ?1
+                OR starts_at > ?2",
+        )?;
+        let ids = statement
+            .query_map(params![starts_after_or_at, ends_before_or_at], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for id in &ids {
+            self.delete_search_record("calendar_event", *id)?;
+        }
+
+        self.connection.execute(
+            "DELETE FROM calendar_events
+             WHERE ends_at < ?1
+                OR starts_at > ?2",
+            params![starts_after_or_at, ends_before_or_at],
+        )?;
+        Ok(ids.len())
+    }
+
+    pub fn recent_teams_messages_from_sender(
+        &self,
+        sender_query: &str,
+        sent_after_or_at: i64,
+        limit: usize,
+    ) -> Result<Vec<TeamsMessage>, StorageError> {
+        let like = format!("%{}%", sender_query.trim().to_ascii_lowercase());
+        let mut statement = self.connection.prepare(
+            "SELECT id, external_id, chat_id, sender_name, sender_external_id,
+                body, importance, web_url, sent_at, synced_at, etag, change_key,
+                is_deleted
+             FROM teams_messages
+             WHERE is_deleted = 0
+                AND sent_at IS NOT NULL
+                AND sent_at >= ?1
+                AND lower(coalesce(sender_name, '')) LIKE ?2
+             ORDER BY sent_at DESC
+             LIMIT ?3",
+        )?;
+
+        let messages = statement
+            .query_map(
+                params![sent_after_or_at, like, limit.clamp(1, 100) as i64],
+                teams_message_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    pub fn calendar_events_in_range(
+        &self,
+        starts_before: i64,
+        ends_after: i64,
+        limit: usize,
+    ) -> Result<Vec<CalendarEvent>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, external_id, subject, organizer_name, organizer_email,
+                starts_at, ends_at, original_timezone, show_as, synced_at,
+                etag, change_key, is_cancelled, is_deleted
+             FROM calendar_events
+             WHERE is_cancelled = 0
+                AND is_deleted = 0
+                AND starts_at IS NOT NULL
+                AND ends_at IS NOT NULL
+                AND starts_at < ?1
+                AND ends_at > ?2
+             ORDER BY starts_at ASC
+             LIMIT ?3",
+        )?;
+
+        let events = statement
+            .query_map(
+                params![starts_before, ends_after, limit.clamp(1, 100) as i64],
+                calendar_event_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
+    pub fn list_outlook_messages(
+        &self,
+        received_after: Option<i64>,
+        received_before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<OutlookMessage>, StorageError> {
+        let mut sql = String::from(
+            "SELECT id, external_id, folder_id, subject, sender_name, sender_email,
+                body_preview, received_at, synced_at, etag, change_key, is_deleted
+             FROM outlook_messages
+             WHERE is_deleted = 0",
+        );
+        let mut values = Vec::new();
+
+        if let Some(received_after) = received_after {
+            sql.push_str(" AND received_at IS NOT NULL AND received_at >= ?");
+            values.push(Value::Integer(received_after));
+        }
+        if let Some(received_before) = received_before {
+            sql.push_str(" AND received_at IS NOT NULL AND received_at <= ?");
+            values.push(Value::Integer(received_before));
+        }
+        sql.push_str(" ORDER BY coalesce(received_at, 0) DESC LIMIT ?");
+        values.push(Value::Integer(limit.clamp(1, 200) as i64));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let messages = statement
+            .query_map(params_from_iter(values.iter()), outlook_message_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    pub fn search_outlook_messages(
+        &self,
+        title: Option<&str>,
+        text: Option<&str>,
+        person: Option<&str>,
+        received_after: Option<i64>,
+        received_before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<OutlookMessage>, StorageError> {
+        let mut sql = String::from(
+            "SELECT id, external_id, folder_id, subject, sender_name, sender_email,
+                body_preview, received_at, synced_at, etag, change_key, is_deleted
+             FROM outlook_messages
+             WHERE is_deleted = 0",
+        );
+        let mut values = Vec::new();
+
+        if let Some(title) = title.filter(|value| !value.trim().is_empty()) {
+            sql.push_str(" AND lower(coalesce(subject, '')) LIKE ?");
+            values.push(Value::Text(format!("%{}%", title.trim().to_ascii_lowercase())));
+        }
+        if let Some(text) = text.filter(|value| !value.trim().is_empty()) {
+            let like = Value::Text(format!("%{}%", text.trim().to_ascii_lowercase()));
+            sql.push_str(" AND (lower(coalesce(subject, '')) LIKE ? OR lower(coalesce(body_preview, '')) LIKE ?)");
+            values.push(like.clone());
+            values.push(like);
+        }
+        if let Some(person) = person.filter(|value| !value.trim().is_empty()) {
+            let like = Value::Text(format!("%{}%", person.trim().to_ascii_lowercase()));
+            sql.push_str(" AND (lower(coalesce(sender_name, '')) LIKE ? OR lower(coalesce(sender_email, '')) LIKE ?)");
+            values.push(like.clone());
+            values.push(like);
+        }
+        if let Some(received_after) = received_after {
+            sql.push_str(" AND received_at IS NOT NULL AND received_at >= ?");
+            values.push(Value::Integer(received_after));
+        }
+        if let Some(received_before) = received_before {
+            sql.push_str(" AND received_at IS NOT NULL AND received_at <= ?");
+            values.push(Value::Integer(received_before));
+        }
+
+        sql.push_str(" ORDER BY coalesce(received_at, 0) DESC LIMIT ?");
+        values.push(Value::Integer(limit.clamp(1, 200) as i64));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let messages = statement
+            .query_map(params_from_iter(values.iter()), outlook_message_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    pub fn list_teams_messages(
+        &self,
+        sent_after: Option<i64>,
+        sent_before: Option<i64>,
+        conversation_like: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TeamsMessage>, StorageError> {
+        let mut sql = String::from(
+            "SELECT id, external_id, chat_id, sender_name, sender_external_id,
+                body, importance, web_url, sent_at, synced_at, etag, change_key,
+                is_deleted
+             FROM teams_messages
+             WHERE is_deleted = 0",
+        );
+        let mut values = Vec::new();
+
+        if let Some(sent_after) = sent_after {
+            sql.push_str(" AND sent_at IS NOT NULL AND sent_at >= ?");
+            values.push(Value::Integer(sent_after));
+        }
+        if let Some(sent_before) = sent_before {
+            sql.push_str(" AND sent_at IS NOT NULL AND sent_at <= ?");
+            values.push(Value::Integer(sent_before));
+        }
+        if let Some(conversation_like) = conversation_like.filter(|value| !value.trim().is_empty()) {
+            sql.push_str(" AND lower(chat_id) LIKE ?");
+            values.push(Value::Text(format!("%{}%", conversation_like.trim().to_ascii_lowercase())));
+        }
+
+        sql.push_str(" ORDER BY coalesce(sent_at, 0) DESC LIMIT ?");
+        values.push(Value::Integer(limit.clamp(1, 200) as i64));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let messages = statement
+            .query_map(params_from_iter(values.iter()), teams_message_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    pub fn search_teams_messages(
+        &self,
+        text: Option<&str>,
+        person: Option<&str>,
+        sent_after: Option<i64>,
+        sent_before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<TeamsMessage>, StorageError> {
+        let mut sql = String::from(
+            "SELECT id, external_id, chat_id, sender_name, sender_external_id,
+                body, importance, web_url, sent_at, synced_at, etag, change_key,
+                is_deleted
+             FROM teams_messages
+             WHERE is_deleted = 0",
+        );
+        let mut values = Vec::new();
+
+        if let Some(text) = text.filter(|value| !value.trim().is_empty()) {
+            sql.push_str(" AND lower(coalesce(body, '')) LIKE ?");
+            values.push(Value::Text(format!("%{}%", text.trim().to_ascii_lowercase())));
+        }
+        if let Some(person) = person.filter(|value| !value.trim().is_empty()) {
+            let like = Value::Text(format!("%{}%", person.trim().to_ascii_lowercase()));
+            sql.push_str(" AND (lower(coalesce(sender_name, '')) LIKE ? OR lower(coalesce(sender_external_id, '')) LIKE ?)");
+            values.push(like.clone());
+            values.push(like);
+        }
+        if let Some(sent_after) = sent_after {
+            sql.push_str(" AND sent_at IS NOT NULL AND sent_at >= ?");
+            values.push(Value::Integer(sent_after));
+        }
+        if let Some(sent_before) = sent_before {
+            sql.push_str(" AND sent_at IS NOT NULL AND sent_at <= ?");
+            values.push(Value::Integer(sent_before));
+        }
+
+        sql.push_str(" ORDER BY coalesce(sent_at, 0) DESC LIMIT ?");
+        values.push(Value::Integer(limit.clamp(1, 200) as i64));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let messages = statement
+            .query_map(params_from_iter(values.iter()), teams_message_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    pub fn list_teams_conversations(
+        &self,
+        channels_only: bool,
+        limit: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut sql = String::from(
+            "SELECT DISTINCT chat_id
+             FROM teams_messages
+             WHERE is_deleted = 0",
+        );
+        if channels_only {
+            sql.push_str(" AND (chat_id LIKE '%/%' OR lower(chat_id) LIKE 'teams-channel%')");
+        } else {
+            sql.push_str(" AND chat_id NOT LIKE '%/%' AND lower(chat_id) NOT LIKE 'teams-channel%'");
+        }
+        sql.push_str(" ORDER BY chat_id LIMIT ?");
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let conversations = statement
+            .query_map([limit.clamp(1, 200) as i64], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(conversations)
+    }
+
+    pub fn list_all_teams_channel_conversations(&self) -> Result<Vec<String>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT chat_id
+             FROM teams_messages
+             WHERE is_deleted = 0
+               AND (chat_id LIKE '%/%' OR lower(chat_id) LIKE 'teams-channel%')
+             ORDER BY chat_id",
+        )?;
+
+        let conversations = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(conversations)
+    }
+
+    pub fn list_calendar_events(
+        &self,
+        starts_after: Option<i64>,
+        starts_before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<CalendarEvent>, StorageError> {
+        let mut sql = String::from(
+            "SELECT id, external_id, subject, organizer_name, organizer_email,
+                starts_at, ends_at, original_timezone, show_as, synced_at,
+                etag, change_key, is_cancelled, is_deleted
+             FROM calendar_events
+             WHERE is_deleted = 0 AND is_cancelled = 0",
+        );
+        let mut values = Vec::new();
+
+        if let Some(starts_after) = starts_after {
+            sql.push_str(" AND starts_at IS NOT NULL AND starts_at >= ?");
+            values.push(Value::Integer(starts_after));
+        }
+        if let Some(starts_before) = starts_before {
+            sql.push_str(" AND starts_at IS NOT NULL AND starts_at <= ?");
+            values.push(Value::Integer(starts_before));
+        }
+
+        sql.push_str(" ORDER BY coalesce(starts_at, 0) ASC LIMIT ?");
+        values.push(Value::Integer(limit.clamp(1, 200) as i64));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let events = statement
+            .query_map(params_from_iter(values.iter()), calendar_event_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+
+    pub fn search_calendar_events(
+        &self,
+        text: Option<&str>,
+        people: Option<&str>,
+        starts_after: Option<i64>,
+        starts_before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<CalendarEvent>, StorageError> {
+        let mut sql = String::from(
+            "SELECT id, external_id, subject, organizer_name, organizer_email,
+                starts_at, ends_at, original_timezone, show_as, synced_at,
+                etag, change_key, is_cancelled, is_deleted
+             FROM calendar_events
+             WHERE is_deleted = 0 AND is_cancelled = 0",
+        );
+        let mut values = Vec::new();
+
+        if let Some(text) = text.filter(|value| !value.trim().is_empty()) {
+            sql.push_str(" AND lower(coalesce(subject, '')) LIKE ?");
+            values.push(Value::Text(format!("%{}%", text.trim().to_ascii_lowercase())));
+        }
+        if let Some(people) = people.filter(|value| !value.trim().is_empty()) {
+            let like = Value::Text(format!("%{}%", people.trim().to_ascii_lowercase()));
+            sql.push_str(" AND (lower(coalesce(organizer_name, '')) LIKE ? OR lower(coalesce(organizer_email, '')) LIKE ?)");
+            values.push(like.clone());
+            values.push(like);
+        }
+        if let Some(starts_after) = starts_after {
+            sql.push_str(" AND starts_at IS NOT NULL AND starts_at >= ?");
+            values.push(Value::Integer(starts_after));
+        }
+        if let Some(starts_before) = starts_before {
+            sql.push_str(" AND starts_at IS NOT NULL AND starts_at <= ?");
+            values.push(Value::Integer(starts_before));
+        }
+
+        sql.push_str(" ORDER BY coalesce(starts_at, 0) ASC LIMIT ?");
+        values.push(Value::Integer(limit.clamp(1, 200) as i64));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let events = statement
+            .query_map(params_from_iter(values.iter()), calendar_event_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(events)
     }

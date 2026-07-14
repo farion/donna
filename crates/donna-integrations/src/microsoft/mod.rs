@@ -1,6 +1,8 @@
 pub mod auth;
+pub mod background_sync;
 pub mod calendar;
 pub mod error;
+mod graph_client;
 pub mod outlook;
 mod sync;
 pub mod teams;

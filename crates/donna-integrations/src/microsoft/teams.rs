@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const TEAMS_CHAT_SOURCE: &str = "teams.chat";
 pub const TEAMS_CHANNEL_SOURCE: &str = "teams.channel";
+const TEAMS_LOOKBACK_DAYS: i64 = 90;
+const DAY_SECONDS: i64 = 86_400;
 
 pub trait TeamsChatGraphClient {
     fn sync_chat_messages(
@@ -73,12 +75,15 @@ where
     C: TeamsChatGraphClient,
 {
     pub fn sync_messages(&self, store: &LocalStore) -> Result<SyncReport, GraphError> {
-        run_sync(
+        let report = run_sync(
             store,
             TEAMS_CHAT_SOURCE,
             |delta_link| self.client.sync_chat_messages(delta_link),
             |message| store.upsert_teams_message(message).map(|_| ()),
-        )
+        )?;
+        let cutoff = now_seconds()? - (TEAMS_LOOKBACK_DAYS * DAY_SECONDS);
+        let _ = store.prune_teams_messages_before(cutoff)?;
+        Ok(report)
     }
 
     pub fn send_message(
@@ -99,12 +104,15 @@ where
     C: TeamsChannelGraphClient,
 {
     pub fn sync_messages(&self, store: &LocalStore) -> Result<SyncReport, GraphError> {
-        run_sync(
+        let report = run_sync(
             store,
             TEAMS_CHANNEL_SOURCE,
             |delta_link| self.client.sync_channel_messages(delta_link),
             |message| store.upsert_teams_message(message).map(|_| ()),
-        )
+        )?;
+        let cutoff = now_seconds()? - (TEAMS_LOOKBACK_DAYS * DAY_SECONDS);
+        let _ = store.prune_teams_messages_before(cutoff)?;
+        Ok(report)
     }
 
     pub fn send_message(

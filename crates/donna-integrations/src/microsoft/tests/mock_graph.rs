@@ -227,11 +227,17 @@ pub(super) fn mail_message(external_id: &str) -> NewOutlookMessage {
         sender_name: Some("Anna".to_owned()),
         sender_email: Some("anna@example.com".to_owned()),
         body_preview: Some(HOSTILE_FIXTURE.to_owned()),
-        received_at: Some(100),
+        received_at: Some(now_seconds()),
         etag: Some("etag".to_owned()),
         change_key: Some("change".to_owned()),
         is_deleted: false,
     }
+}
+
+pub(super) fn mail_message_with_received_at(external_id: &str, received_at: i64) -> NewOutlookMessage {
+    let mut message = mail_message(external_id);
+    message.received_at = Some(received_at);
+    message
 }
 
 pub(super) fn teams_message(external_id: &str, chat_id: &str) -> NewTeamsMessage {
@@ -243,11 +249,28 @@ pub(super) fn teams_message(external_id: &str, chat_id: &str) -> NewTeamsMessage
         body: HOSTILE_FIXTURE.to_owned(),
         importance: Some("normal".to_owned()),
         web_url: Some("https://teams.example.invalid/message".to_owned()),
-        sent_at: Some(200),
+        sent_at: Some(now_seconds()),
         etag: Some("etag".to_owned()),
         change_key: Some("change".to_owned()),
         is_deleted: false,
     }
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+pub(super) fn teams_message_with_sent_at(
+    external_id: &str,
+    chat_id: &str,
+    sent_at: i64,
+) -> NewTeamsMessage {
+    let mut message = teams_message(external_id, chat_id);
+    message.sent_at = Some(sent_at);
+    message
 }
 
 pub(super) fn calendar_event(

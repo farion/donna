@@ -102,7 +102,9 @@ pub struct MicrosoftConfig {
     pub tenant_id: String,
     pub scopes: Vec<String>,
     pub account_hint: Option<String>,
+    pub client_secret_ref: Option<String>,
     pub token_secret_ref: Option<String>,
+    pub teams_activity_window_days: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -254,7 +256,9 @@ impl Default for MicrosoftConfig {
             tenant_id: "common".to_owned(),
             scopes: default_microsoft_scopes(),
             account_hint: None,
+            client_secret_ref: None,
             token_secret_ref: None,
+            teams_activity_window_days: 90,
         }
     }
 }

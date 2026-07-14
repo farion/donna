@@ -63,6 +63,28 @@ fn outlook_sync_updates_state_and_persists_message() {
 }
 
 #[test]
+fn outlook_sync_prunes_messages_older_than_90_days() {
+    let store = LocalStore::in_memory().expect("store");
+    store
+        .upsert_outlook_message(&mail_message_with_received_at("old-message", 1))
+        .expect("seed old message");
+    let fresh = 2_000_000_000;
+    let client = MockOutlookClient::with_messages(vec![mail_message_with_received_at(
+        "fresh-message",
+        fresh,
+    )]);
+    let adapter = OutlookAdapter::new(client);
+
+    adapter.sync_mail(&store).expect("sync mail");
+
+    let old = store.outlook_message_by_external_id("old-message");
+    let fresh_loaded = store.outlook_message_by_external_id("fresh-message");
+
+    assert!(old.is_err());
+    assert!(fresh_loaded.is_ok());
+}
+
+#[test]
 fn graph_sync_failure_marks_source_stale_with_clear_error() {
     let store = LocalStore::in_memory().expect("store");
     let client = MockOutlookClient::failing_admin_consent();
@@ -171,6 +193,26 @@ fn teams_chat_sync_persists_message_and_delta_state() {
     );
     assert_eq!(client.sync_calls.get(), 1);
     assert_eq!(client.last_delta.borrow().as_deref(), None);
+}
+
+#[test]
+fn teams_sync_prunes_messages_older_than_90_days() {
+    let store = LocalStore::in_memory().expect("store");
+    store
+        .upsert_teams_message(&teams_message_with_sent_at("old-chat", "chat-1", 1))
+        .expect("seed old teams message");
+    let fresh = 2_000_000_000;
+    let client =
+        MockTeamsChatClient::with_messages(vec![teams_message_with_sent_at("fresh-chat", "chat-1", fresh)]);
+    let adapter = TeamsChatAdapter::new(client);
+
+    adapter.sync_messages(&store).expect("sync teams");
+
+    let old = store.teams_message_by_external_id("old-chat");
+    let fresh_loaded = store.teams_message_by_external_id("fresh-chat");
+
+    assert!(old.is_err());
+    assert!(fresh_loaded.is_ok());
 }
 
 #[test]
@@ -304,8 +346,8 @@ fn calendar_sync_persists_event_and_delta_state() {
     let client = MockCalendarClient::with_events(vec![calendar_event(
         "event-1",
         HOSTILE_FIXTURE,
-        300,
-        360,
+        now_seconds() + 300,
+        now_seconds() + 360,
         "busy",
         false,
         false,
@@ -331,6 +373,53 @@ fn calendar_sync_persists_event_and_delta_state() {
         Some("calendar-delta")
     );
     assert_eq!(client.sync_calls.get(), 1);
+}
+
+#[test]
+fn calendar_sync_prunes_events_outside_90_day_window() {
+    let store = LocalStore::in_memory().expect("store");
+    store
+        .upsert_calendar_event(&calendar_event("old-event", "Old", 1, 2, "busy", false, false))
+        .expect("old event");
+    let far_future = 9_999_999_999;
+    store
+        .upsert_calendar_event(&calendar_event(
+            "future-event",
+            "Future",
+            far_future,
+            far_future + 100,
+            "busy",
+            false,
+            false,
+        ))
+        .expect("future event");
+
+    let now = now_seconds();
+    let inside_start = now + 60;
+    let inside_end = inside_start + 3600;
+    let client = MockCalendarClient::with_events(vec![calendar_event(
+        "inside-event",
+        "Inside",
+        inside_start,
+        inside_end,
+        "busy",
+        false,
+        false,
+    )]);
+    let adapter = CalendarAdapter::new(client);
+
+    adapter.sync_events(&store).expect("sync calendar");
+
+    assert!(store.calendar_event_by_external_id("old-event").is_err());
+    assert!(store.calendar_event_by_external_id("future-event").is_err());
+    assert!(store.calendar_event_by_external_id("inside-event").is_ok());
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[test]

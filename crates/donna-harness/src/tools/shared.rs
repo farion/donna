@@ -38,6 +38,21 @@ pub(super) fn optional_i64_argument(
     })
 }
 
+pub(super) fn usize_argument(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    names: &[&str],
+    default: usize,
+) -> usize {
+    names
+        .iter()
+        .find_map(|name| match arguments.get(*name)? {
+            serde_json::Value::Number(number) => number.as_u64().map(|value| value as usize),
+            serde_json::Value::String(text) => text.trim().parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
 pub(super) fn string_argument(
     arguments: &serde_json::Map<String, serde_json::Value>,
     names: &[&str],

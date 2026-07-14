@@ -1,5 +1,6 @@
 use donna_config::AppConfig;
 use donna_integrations::auth::run_auth_wizard;
+use donna_integrations::microsoft::background_sync::run_sync_once as run_microsoft_sync_once;
 use donna_integrations::secrets::KeyringSecretStore;
 use donna_storage::LocalStore;
 use donna_ui::app::{DonnaApp, native_options};
@@ -82,7 +83,12 @@ fn run_hidden_daemon(
             return;
         }
     };
+    eprintln!("donna hidden: triggering Microsoft sync (startup)");
+    if let Err(error) = run_microsoft_sync_once(&store, &config, &KeyringSecretStore::default()) {
+        eprintln!("donna hidden: microsoft sync failed on startup: {error}");
+    }
     let mut last_check_minute = None;
+    let mut last_microsoft_sync_minute = unix_now_seconds().map(|seconds| seconds / 60);
 
     loop {
         let wakeup_requested = wakeup_receiver
@@ -101,6 +107,13 @@ fn run_hidden_daemon(
             continue;
         };
         let minute = now / 60;
+        if last_microsoft_sync_minute != Some(minute) {
+            last_microsoft_sync_minute = Some(minute);
+            eprintln!("donna hidden: triggering Microsoft sync (minute={minute})");
+            if let Err(error) = run_microsoft_sync_once(&store, &config, &KeyringSecretStore::default()) {
+                eprintln!("donna hidden: microsoft sync failed: {error}");
+            }
+        }
         if last_check_minute != Some(minute) {
             last_check_minute = Some(minute);
             match store.create_todo_reminder_attention(now) {

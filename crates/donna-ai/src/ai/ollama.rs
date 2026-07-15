@@ -68,10 +68,11 @@ impl OllamaProvider {
                 detail: format!("failed to send Ollama request: {error}"),
             })?;
 
-        // Read and discard HTTP headers, then stream NDJSON body line by line.
+        // Read and discard HTTP headers; detect chunked transfer encoding.
         let mut reader = BufReader::new(stream);
         let mut header_line = String::new();
         let mut status_ok = false;
+        let mut chunked = false;
         loop {
             header_line.clear();
             reader
@@ -82,6 +83,9 @@ impl OllamaProvider {
                 })?;
             if header_line.starts_with("HTTP/") {
                 status_ok = header_line.contains(" 200 ");
+            }
+            if header_line.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+                chunked = true;
             }
             if header_line == "\r\n" || header_line.is_empty() {
                 break;
@@ -109,6 +113,11 @@ impl OllamaProvider {
             }
             let trimmed = line.trim();
             if trimmed.is_empty() {
+                continue;
+            }
+            // In chunked transfer encoding every data line is preceded by a
+            // hex chunk-size line. Skip those lines — they are pure ASCII hex.
+            if chunked && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
                 continue;
             }
             let chunk =

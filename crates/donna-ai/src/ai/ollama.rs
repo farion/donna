@@ -3,8 +3,7 @@ use super::{
 };
 use donna_core::model::ModelDefinition;
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 
 pub struct OllamaProvider;
@@ -36,53 +35,105 @@ impl OllamaProvider {
             .ok_or_else(|| AiError::MissingBaseUrl(model.id.clone()))?;
         let mut request = request.clone();
         request.stream = true;
-        let response = reqwest::blocking::Client::new()
-            .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
-            .json(&Self::chat_payload(model, &request))
-            .send()
+        let body =
+            serde_json::to_string(&Self::chat_payload(model, &request)).map_err(|error| {
+                AiError::ProviderUnavailable {
+                    provider: self.family(),
+                    detail: format!("failed to encode Ollama request: {error}"),
+                }
+            })?;
+
+        let endpoint = parse_http_endpoint(base_url)?;
+        let request_path =
+            format!("{}/api/chat", endpoint.path_prefix.trim_end_matches('/'));
+        let http_request = format!(
+            "POST {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            endpoint.host_header,
+            body.len(),
+            body
+        );
+        let mut stream = TcpStream::connect(&endpoint.address).map_err(|error| {
+            AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!(
+                    "could not connect to Ollama at {}: {error}",
+                    endpoint.address
+                ),
+            }
+        })?;
+        stream
+            .write_all(http_request.as_bytes())
             .map_err(|error| AiError::ProviderUnavailable {
                 provider: self.family(),
                 detail: format!("failed to send Ollama request: {error}"),
             })?;
-        let status = response.status();
-        if !status.is_success() {
+
+        // Read and discard HTTP headers, then stream NDJSON body line by line.
+        let mut reader = BufReader::new(stream);
+        let mut header_line = String::new();
+        let mut status_ok = false;
+        loop {
+            header_line.clear();
+            reader
+                .read_line(&mut header_line)
+                .map_err(|error| AiError::ProviderUnavailable {
+                    provider: self.family(),
+                    detail: format!("failed to read Ollama response headers: {error}"),
+                })?;
+            if header_line.starts_with("HTTP/") {
+                status_ok = header_line.contains(" 200 ");
+            }
+            if header_line == "\r\n" || header_line.is_empty() {
+                break;
+            }
+        }
+        if !status_ok {
             return Err(AiError::ProviderUnavailable {
                 provider: self.family(),
-                detail: format!("Ollama returned {status}"),
+                detail: "Ollama returned a non-200 response".to_owned(),
             });
         }
 
         let mut text = String::new();
-        for line in std::io::BufReader::new(response).lines() {
-            let line = line.map_err(|error| AiError::ProviderUnavailable {
-                provider: self.family(),
-                detail: format!("failed to read Ollama stream: {error}"),
-            })?;
-            if line.trim().is_empty() {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|error| AiError::ProviderUnavailable {
+                    provider: self.family(),
+                    detail: format!("failed to read Ollama stream: {error}"),
+                })?;
+            if n == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            let response = serde_json::from_str::<OllamaChatResponse>(&line).map_err(|error| {
-                AiError::ProviderUnavailable {
-                    provider: self.family(),
-                    detail: format!("failed to decode Ollama stream: {error}"),
-                }
-            })?;
-            if let Some(error) = response.error {
+            let chunk =
+                serde_json::from_str::<OllamaChatResponse>(trimmed).map_err(|error| {
+                    AiError::ProviderUnavailable {
+                        provider: self.family(),
+                        detail: format!("failed to decode Ollama stream: {error}"),
+                    }
+                })?;
+            if let Some(error) = chunk.error {
                 return Err(AiError::ProviderUnavailable {
                     provider: self.family(),
                     detail: error,
                 });
             }
-            let delta = response
+            let delta = chunk
                 .message
-                .map(|message| message.content)
-                .or(response.response)
+                .map(|m| m.content)
+                .or(chunk.response)
                 .unwrap_or_default();
             if !delta.is_empty() {
                 text.push_str(&delta);
                 on_delta(&delta);
             }
-            if response.done.unwrap_or(false) {
+            if chunk.done.unwrap_or(false) {
                 break;
             }
         }

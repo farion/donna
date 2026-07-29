@@ -346,7 +346,7 @@ fn parse_query(query: &str) -> HashMap<String, String> {
         .collect()
 }
 
-fn percent_encode(value: &str) -> String {
+pub(crate) fn percent_encode(value: &str) -> String {
     value
         .bytes()
         .flat_map(|byte| match byte {

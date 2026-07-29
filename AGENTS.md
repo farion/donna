@@ -44,6 +44,8 @@ The assistant helps with chat, memories, todos, Microsoft Teams, Outlook, calend
 - `donna-harness` is not the executable launcher. The launcher binary wires CLI/runtime startup and depends on `donna-ui` and `donna-harness`.
 - Put AI tool implementations such as `create_todo`, `remember_fact`, search, and prepare/send workflows in `donna-harness`; keep provider HTTP/API details in the AI provider crate.
 - Each AI tool must have its own Rust source file in `donna-harness` and its own Markdown usage description under `assets/`.
+- Every tool call dispatched in `execute_model_tool_call` (`crates/donna-harness/src/tools/mod.rs`) must be logged with its tool name, arguments, and result.
+- Whenever a tool is added, removed, or its arguments change, update the tool table in `README.md`'s `## Tools` section to match.
 - Never put prompt text in Rust source code. Prompts, prompt preambles, tool descriptions, fallback prompts, and prompt templates must live in files under `assets/` and be loaded or embedded from there.
 - Tool behavior must be enforced in Rust. Markdown tool descriptions are prompt material only and must never be treated as executable policy.
 - Side-effecting external tools such as mail, Teams, calendar changes, and note writes must create approval requests and execute only after explicit approval.

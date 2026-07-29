@@ -220,6 +220,8 @@ pub struct NewCalendarEvent {
     pub change_key: Option<String>,
     pub is_cancelled: bool,
     pub is_deleted: bool,
+    pub is_all_day: bool,
+    pub attendees: Vec<CalendarAttendee>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +240,18 @@ pub struct CalendarEvent {
     pub change_key: Option<String>,
     pub is_cancelled: bool,
     pub is_deleted: bool,
+    pub is_all_day: bool,
+    pub attendees: Vec<CalendarAttendee>,
+}
+
+/// A meeting participant other than the organizer. `is_optional` mirrors
+/// Microsoft Graph's attendee `type` ("required" vs "optional"); resource
+/// attendees (rooms/equipment) are not synced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarAttendee {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub is_optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

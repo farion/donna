@@ -8,6 +8,8 @@ pub struct ModelDefinition {
     pub model: String,
     pub base_url: Option<String>,
     pub secret_ref: Option<String>,
+    /// Ollama-only context window override; see `ModelConfig::context_length`.
+    pub context_length: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +94,7 @@ impl From<ModelConfig> for ModelDefinition {
             model: config.model,
             base_url: config.base_url,
             secret_ref: config.secret_ref,
+            context_length: config.context_length,
         }
     }
 }

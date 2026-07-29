@@ -2,6 +2,7 @@ pub mod attention;
 pub mod chat;
 pub mod command;
 pub mod model;
+pub mod time;
 
 pub use attention::*;
 pub use chat::*;

@@ -1,5 +1,5 @@
 use crate::avatar::AvatarManager;
-use crate::ipc::{IpcEvent, wakeup_window};
+use crate::ipc::{IpcEvent, RepaintSignal, new_repaint_signal, set_repaint_context};
 use donna_ai::{
     AiMessage, AiProvider, AiRequest, AiRole, MockProvider, OllamaProvider,
     OpenAiCompatibleProvider, ProviderCatalog, ProviderFamily,
@@ -15,6 +15,7 @@ use donna_harness::tasks::{
 };
 use donna_harness::tools::{
     execute_tool_call_from_model, humanize_model_todo_leak, local_tool_prompt,
+    tag_calendar_followup_with_event_id,
 };
 use donna_integrations::microsoft::background_sync::run_sync_once as run_microsoft_sync_once;
 use donna_integrations::secrets::{KeyringSecretStore, SecretStore};
@@ -24,8 +25,8 @@ use eframe::egui::{
     UiBuilder, Vec2,
 };
 use egui_phosphor::Variant as PhosphorVariant;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,10 +54,39 @@ use ui_style::{apply_style, palette_for, render_message};
 
 const IDLE_DEFAULT_DURATION: Duration = Duration::from_secs(10);
 const IDLE_PULSE_DURATION: Duration = Duration::from_millis(700);
+/// Microsoft sync percentages and the running-task count are read from
+/// SQLite; throttling avoids hitting the database on every single UI frame
+/// (up to 60x/sec) for values that only meaningfully change a few times a
+/// minute.
+const ACTIVITY_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+/// Fallback heartbeat so background-task/minute-boundary checks
+/// (`run_due_local_tasks`, `run_due_microsoft_sync`) keep ticking even while
+/// hidden and nothing else is causing a repaint. Real wakeup responsiveness
+/// no longer depends on this interval: the listener thread (`ipc.rs`) calls
+/// `ctx.request_repaint()` directly the instant a `donna --wakeup` message
+/// arrives via `RepaintSignal`, so this can be coarse. It previously
+/// rescheduled a full repaint every 250ms forever, in every state including
+/// Hidden, which kept the whole app rendering at ~4Hz around the clock.
+const WAKEUP_POLL_INTERVAL: Duration = Duration::from_secs(20);
 const REMEMBERED_FACTS_CONTEXT_PROMPT: &str =
     include_str!("../../../assets/prompts/context/remembered_facts.md");
 const CURRENT_OPEN_TODOS_CONTEXT_PROMPT: &str =
     include_str!("../../../assets/prompts/context/current_open_todos.md");
+const CURRENT_DATE_TIME_CONTEXT_PROMPT: &str =
+    include_str!("../../../assets/prompts/context/current_date_time.md");
+const WELCOME_GREETING_PROMPT: &str =
+    include_str!("../../../assets/prompts/context/welcome_greeting.md");
+const TOOL_RESULT_FOLLOWUP_PROMPT: &str =
+    include_str!("../../../assets/prompts/context/tool_result_followup.md");
+const WEEKDAY_NAMES: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
 
 pub struct DonnaApp {
     config_path: PathBuf,
@@ -73,6 +103,8 @@ pub struct DonnaApp {
     microsoft_sync_in_progress: bool,
     microsoft_sync_status: MicrosoftSyncUiStatus,
     microsoft_sync_receiver: Option<Receiver<Result<(), String>>>,
+    running_task_count: usize,
+    last_activity_status_refresh: Instant,
     input: String,
     input_history: Vec<String>,
     input_history_cursor: Option<usize>,
@@ -82,11 +114,21 @@ pub struct DonnaApp {
     pending_exit_confirmation: bool,
     models: ModelRegistry,
     selected_model_id: String,
+    model_warmup_in_progress: bool,
+    model_warmup_model_id: Option<String>,
+    model_warmup_receiver: Option<Receiver<Result<(), String>>>,
+    warmed_model_ids: HashSet<String>,
     avatar_manager: AvatarManager,
     state: DonnaState,
     response_in_progress: bool,
     streaming_response: Option<StreamingResponse>,
     response_started_at: Option<Instant>,
+    /// Messages submitted while a response was already in progress. Each is
+    /// pushed into `chat` immediately (as a "queued" bubble the user can
+    /// cancel) rather than held back invisibly, so the transcript always
+    /// reflects everything the user has actually typed; only *sending* it
+    /// to the model waits until Donna finishes the current answer.
+    queued_prompts: VecDeque<QueuedPrompt>,
     name_prompt_asked: bool,
     name_prompt_pending: bool,
     approval_pending: bool,
@@ -97,12 +139,36 @@ pub struct DonnaApp {
     wakeup_receiver: Option<Arc<Mutex<Receiver<IpcEvent>>>>,
 }
 
+/// A user message submitted while Donna was still answering a previous one.
+/// Its chat bubble already exists (pushed at submit time); this just tracks
+/// which bubble it is and its raw text, so it can be sent to the model, or
+/// cancelled and removed, once it reaches the front of the queue.
+struct QueuedPrompt {
+    message_id: u64,
+    text: String,
+}
+
 struct StreamingResponse {
     receiver: Receiver<ChatWorkerEvent>,
     message_id: u64,
     text: String,
     placeholder: String,
     user_message: String,
+    /// Set once a tool call has been executed and a second model round-trip
+    /// was kicked off to let the model phrase the final answer from the
+    /// tool's raw output, instead of showing that raw output verbatim.
+    tool_followup: Option<ToolFollowup>,
+    selection: Option<donna_ai::ProviderSelection>,
+    auth_material: Option<String>,
+}
+
+/// Carries the raw tool result through the second round-trip so it can be
+/// shown immediately (good interim UX while a local model is still slow to
+/// respond) and used as a fallback if that round-trip errors, times out, or
+/// the model ignores the "don't call a tool" instruction and emits another
+/// tool call instead of prose.
+struct ToolFollowup {
+    raw_tool_result: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -151,12 +217,14 @@ impl DonnaApp {
         creation: &eframe::CreationContext<'_>,
         hide_requested: Arc<AtomicBool>,
         wakeup_receiver: Arc<Mutex<Receiver<IpcEvent>>>,
+        repaint_signal: RepaintSignal,
     ) -> Self {
         Self::new_with_config_path_and_hide_signal(
             creation,
             AppConfig::default_path(),
             hide_requested,
             Some(wakeup_receiver),
+            repaint_signal,
         )
     }
 
@@ -166,6 +234,7 @@ impl DonnaApp {
             config_path,
             Arc::new(AtomicBool::new(false)),
             None,
+            new_repaint_signal(),
         )
     }
 
@@ -174,8 +243,11 @@ impl DonnaApp {
         config_path: PathBuf,
         hide_requested: Arc<AtomicBool>,
         wakeup_receiver: Option<Arc<Mutex<Receiver<IpcEvent>>>>,
+        repaint_signal: RepaintSignal,
     ) -> Self {
+        set_repaint_context(&repaint_signal, creation.egui_ctx.clone());
         let (mut config, config_notice) = AppConfig::load_or_default_at(&config_path);
+        donna_core::time::configure_time_format(config.ui.time_format);
         Self::install_phosphor_icons(&creation.egui_ctx);
         let (store, storage_notice) = match LocalStore::open(&config.data.database_path) {
             Ok(store) => (Some(store), None),
@@ -211,6 +283,8 @@ impl DonnaApp {
             microsoft_sync_in_progress: false,
             microsoft_sync_status: MicrosoftSyncUiStatus::default(),
             microsoft_sync_receiver: None,
+            running_task_count: 0,
+            last_activity_status_refresh: Instant::now(),
             sensitive_memory_reviews: memory_review::SensitiveMemoryReviews::default(),
             input: String::new(),
             input_history: Vec::new(),
@@ -221,11 +295,16 @@ impl DonnaApp {
             pending_exit_confirmation: false,
             models,
             selected_model_id,
+            model_warmup_in_progress: false,
+            model_warmup_model_id: None,
+            model_warmup_receiver: None,
+            warmed_model_ids: HashSet::new(),
             avatar_manager: AvatarManager::new(),
             state: DonnaState::Idle,
             response_in_progress: false,
             streaming_response: None,
             response_started_at: None,
+            queued_prompts: VecDeque::new(),
             name_prompt_asked: false,
             name_prompt_pending: false,
             approval_pending: false,
@@ -236,18 +315,87 @@ impl DonnaApp {
             wakeup_receiver,
         };
         app.trigger_microsoft_sync("startup");
+        app.trigger_model_warmup(&app.selected_model_id.clone());
+        // Only greet with a model-generated message on a real app launch
+        // (`wakeup_receiver` is only `Some` there) — not for the
+        // programmatic/test constructors, which need a clean, predictable
+        // chat session to assert against.
+        if app.wakeup_receiver.is_some() {
+            app.start_welcome_greeting();
+        }
         app
     }
 
     fn cycle_model(&mut self) {
         if let Some(next_model) = self.models.next_after(&self.selected_model_id) {
-            self.selected_model_id = next_model.id.clone();
+            let next_model_id = next_model.id.clone();
+            self.selected_model_id = next_model_id.clone();
             self.config.ai.chat.selected_model = self.selected_model_id.clone();
 
             if let Err(error) = self.config.save_to_path(&self.config_path) {
                 self.config_notice = Some(error.to_string());
             }
+            self.trigger_model_warmup(&next_model_id);
         }
+    }
+
+    fn trigger_model_warmup(&mut self, model_id: &str) {
+        if self.model_warmup_in_progress || self.warmed_model_ids.contains(model_id) {
+            return;
+        }
+        let Some(model) = self.models.model_by_id(model_id).cloned() else {
+            return;
+        };
+        if model.provider != "ollama" {
+            return;
+        }
+
+        eprintln!("donna ui: warming up Ollama model ({model_id})");
+        let (sender, receiver) = mpsc::channel();
+        self.model_warmup_in_progress = true;
+        self.model_warmup_model_id = Some(model_id.to_owned());
+        self.model_warmup_receiver = Some(receiver);
+        thread::spawn(move || {
+            let result = OllamaProvider.warm_up(&model).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn poll_model_warmup(&mut self) {
+        let Some(receiver) = self.model_warmup_receiver.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("model warm-up worker disconnected".to_owned())
+            }
+        };
+
+        self.model_warmup_in_progress = false;
+        self.model_warmup_receiver = None;
+        let Some(model_id) = self.model_warmup_model_id.take() else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                eprintln!("donna ui: Ollama model warm-up finished ({model_id})");
+                self.warmed_model_ids.insert(model_id);
+            }
+            Err(error) => {
+                eprintln!("donna ui: Ollama model warm-up failed ({model_id}): {error}");
+            }
+        }
+    }
+
+    fn is_selected_model_warming_up(&self) -> bool {
+        self.model_warmup_in_progress
+            && self.model_warmup_model_id.as_deref() == Some(self.selected_model_id.as_str())
+    }
+
+    fn is_selected_model_warmed_up(&self) -> bool {
+        self.warmed_model_ids.contains(&self.selected_model_id)
     }
 
     fn submit_input(&mut self, ctx: &egui::Context) {
@@ -260,15 +408,19 @@ impl DonnaApp {
         match parse_input(&input) {
             ParsedInput::Empty => {}
             ParsedInput::Message(message) => {
-                if self.response_in_progress {
-                    self.input = message;
-                    self.input_notice = Some("Donna is still thinking.".to_owned());
-                    return;
-                }
                 self.remember_submitted_input(&input);
                 self.pending_exit_confirmation = false;
                 self.state = DonnaState::Idle;
-                self.chat.push_user_message(message.as_str());
+                let Some(message_id) = self.chat.push_user_message(message.as_str()) else {
+                    return;
+                };
+                if self.response_in_progress {
+                    self.queued_prompts.push_back(QueuedPrompt {
+                        message_id,
+                        text: message,
+                    });
+                    return;
+                }
                 self.persist_structured_chat_records(&message);
                 if !self.name_prompt_asked && !self.knows_user_name() {
                     self.name_prompt_asked = true;
@@ -320,9 +472,7 @@ impl DonnaApp {
         self.state = DonnaState::Hidden;
         self.input_notice = Some("Donna is hidden. Background tasks keep running.".to_owned());
         self.hide_requested.store(false, Ordering::SeqCst);
-        if !hide_with_compositor() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
     }
 
     fn handle_change_character_command(&mut self, character: Option<&str>) {
@@ -448,12 +598,11 @@ impl DonnaApp {
         if woke {
             self.state = DonnaState::Idle;
             self.hide_requested.store(false, Ordering::SeqCst);
-            wakeup_window();
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.request_repaint();
         } else {
-            ctx.request_repaint_after(Duration::from_millis(250));
+            ctx.request_repaint_after(WAKEUP_POLL_INTERVAL);
         }
     }
 
@@ -538,6 +687,36 @@ impl DonnaApp {
         }
     }
 
+    /// Sends the next queued prompt (if any) to the model now that Donna
+    /// has finished her current answer, in the order the user submitted
+    /// them (FIFO). No-op when the queue is empty.
+    fn start_next_queued_prompt(&mut self) {
+        let Some(queued) = self.queued_prompts.pop_front() else {
+            return;
+        };
+        self.persist_structured_chat_records(&queued.text);
+        if !self.name_prompt_asked && !self.knows_user_name() {
+            self.name_prompt_asked = true;
+            self.name_prompt_pending = true;
+        }
+        self.start_chat_response();
+    }
+
+    /// Cancels a still-queued prompt: removes its bubble from the transcript
+    /// and drops it from the queue. No-op if it already started processing
+    /// (it will have left the queue by then) or doesn't exist.
+    fn cancel_queued_prompt(&mut self, message_id: u64) {
+        let Some(index) = self
+            .queued_prompts
+            .iter()
+            .position(|queued| queued.message_id == message_id)
+        else {
+            return;
+        };
+        self.queued_prompts.remove(index);
+        self.chat.remove_message(message_id);
+    }
+
     fn start_chat_response(&mut self) {
         let selection =
             match ProviderCatalog::select_chat_model(&self.models, &self.selected_model_id) {
@@ -571,18 +750,36 @@ impl DonnaApp {
         let auth_material = match load_model_auth_material(&selection) {
             Ok(auth_material) => auth_material,
             Err(error) => {
-                self.chat.push_donna_message(error);
+                self.config_notice = Some(error);
                 return;
             }
         };
-        let user_message = self
-            .chat
-            .messages()
-            .iter()
-            .rev()
-            .find(|message| message.speaker == Speaker::User)
-            .map(|message| message.text.clone())
-            .unwrap_or_default();
+        // Include the previous user turn along with the latest one: keyword
+        // corrections (`wants_attendees`, today/tomorrow date-range fixups)
+        // only see this combined string, and a short follow-up like "which
+        // are the attendees of that meeting?" carries no date or name of its
+        // own — the context that answers it (e.g. "today", a person's name)
+        // lives in the turn before. Without it, the follow-up's tool call
+        // falls back to the model's own guessed date range, which is
+        // unreliable.
+        let user_message = {
+            let recent_user_messages: Vec<&str> = self
+                .chat
+                .messages()
+                .iter()
+                .rev()
+                .filter(|message| message.speaker == Speaker::User)
+                .take(2)
+                .map(|message| message.text.as_str())
+                .collect();
+            recent_user_messages
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        eprintln!("donna ui: chat input: {user_message}");
 
         let Some(message_id) = self.chat.push_donna_message("...") else {
             return;
@@ -594,6 +791,52 @@ impl DonnaApp {
             text: String::new(),
             placeholder: String::new(),
             user_message,
+            tool_followup: None,
+            selection: Some(selection.clone()),
+            auth_material: auth_material.clone(),
+        });
+        self.response_in_progress = true;
+        self.response_started_at = Some(Instant::now());
+        thread::spawn(move || run_chat_worker(selection, request, auth_material, sender));
+    }
+
+    /// Replaces the static placeholder welcome message with one the model
+    /// generates fresh each launch, so the opening line isn't always the
+    /// same handful of hardcoded strings. Fails silently (keeping the
+    /// static placeholder already in the chat) if no model/auth is
+    /// available, since a missing greeting is not worth surfacing as an
+    /// error on startup.
+    fn start_welcome_greeting(&mut self) {
+        let Some(message_id) = self.chat.messages().first().map(|message| message.id) else {
+            return;
+        };
+        let Ok(selection) = ProviderCatalog::select_chat_model(&self.models, &self.selected_model_id)
+        else {
+            return;
+        };
+        let Ok(auth_material) = load_model_auth_material(&selection) else {
+            return;
+        };
+
+        let prompt = load_system_prompt(&self.config);
+        if let Some(notice) = prompt.notice {
+            self.config_notice = Some(notice);
+        }
+        let mut system_prompt = self.system_prompt_with_memories(prompt.content);
+        system_prompt.push_str(WELCOME_GREETING_PROMPT);
+        let request = AiRequest::new(system_prompt)
+            .with_message(AiMessage::trusted(AiRole::User, "(app startup)"));
+
+        let (sender, receiver) = mpsc::channel();
+        self.streaming_response = Some(StreamingResponse {
+            receiver,
+            message_id,
+            text: String::new(),
+            placeholder: String::new(),
+            user_message: String::new(),
+            tool_followup: None,
+            selection: None,
+            auth_material: None,
         });
         self.response_in_progress = true;
         self.response_started_at = Some(Instant::now());
@@ -601,6 +844,7 @@ impl DonnaApp {
     }
 
     fn system_prompt_with_memories(&mut self, mut system_prompt: String) -> String {
+        self.append_current_date_time_to_prompt(&mut system_prompt);
         let Some(store) = &self.store else {
             return system_prompt;
         };
@@ -621,6 +865,15 @@ impl DonnaApp {
         }
         self.append_open_todos_to_prompt(&mut system_prompt);
         system_prompt
+    }
+
+    fn append_current_date_time_to_prompt(&self, system_prompt: &mut String) {
+        let Some(now) = unix_now_seconds() else {
+            return;
+        };
+        system_prompt.push_str(CURRENT_DATE_TIME_CONTEXT_PROMPT);
+        system_prompt.push_str(&current_date_time_line(now));
+        system_prompt.push('\n');
     }
 
     fn append_open_todos_to_prompt(&mut self, system_prompt: &mut String) {
@@ -670,14 +923,51 @@ impl DonnaApp {
                         .replace_message_text(streaming.message_id, streaming.text.clone());
                 }
                 ChatWorkerEvent::Finished(text) => {
+                    if let Some(followup) = streaming.tool_followup.take() {
+                        let final_text = finalize_tool_followup_text(text, &followup.raw_tool_result);
+                        eprintln!("donna ui: chat output: {final_text}");
+                        self.chat
+                            .replace_message_text(streaming.message_id, final_text);
+                        finished = true;
+                        continue;
+                    }
+
                     if let Some(tool_result) = execute_tool_call_from_model(
                         self.store.as_ref(),
                         &text,
                         &streaming.user_message,
                     ) {
+                        eprintln!("donna harness: chat model raw tool call: {text}");
                         self.chat
-                            .replace_message_text(streaming.message_id, tool_result);
-                        finished = true;
+                            .replace_message_text(streaming.message_id, tool_result.clone());
+
+                        let followup_selection = streaming
+                            .selection
+                            .clone()
+                            .filter(|selection| selection.family != ProviderFamily::Mock);
+                        match followup_selection {
+                            Some(selection) => {
+                                let request = build_tool_followup_request(
+                                    &streaming.user_message,
+                                    &tool_result,
+                                );
+                                let auth_material = streaming.auth_material.clone();
+                                let (sender, receiver) = mpsc::channel();
+                                streaming.receiver = receiver;
+                                streaming.text.clear();
+                                streaming.placeholder.clear();
+                                streaming.tool_followup = Some(ToolFollowup {
+                                    raw_tool_result: tool_result,
+                                });
+                                thread::spawn(move || {
+                                    run_chat_worker(selection, request, auth_material, sender)
+                                });
+                            }
+                            None => {
+                                eprintln!("donna ui: chat output: {tool_result}");
+                                finished = true;
+                            }
+                        }
                         continue;
                     }
                     if streaming.text.is_empty() {
@@ -686,12 +976,24 @@ impl DonnaApp {
                         } else {
                             humanize_model_todo_leak(self.store.as_ref(), text)
                         };
+                        eprintln!("donna ui: chat output: {text}");
                         self.chat.replace_message_text(streaming.message_id, text);
+                    } else {
+                        eprintln!("donna ui: chat output: {}", streaming.text);
                     }
                     finished = true;
                 }
                 ChatWorkerEvent::Error(error) => {
-                    self.chat.replace_message_text(streaming.message_id, error);
+                    if let Some(followup) = streaming.tool_followup.take() {
+                        eprintln!(
+                            "donna ui: tool follow-up call failed ({error}); keeping raw tool result"
+                        );
+                        self.chat
+                            .replace_message_text(streaming.message_id, followup.raw_tool_result);
+                    } else {
+                        self.chat.remove_message(streaming.message_id);
+                        self.config_notice = Some(error);
+                    }
                     finished = true;
                 }
             }
@@ -707,8 +1009,13 @@ impl DonnaApp {
                     "By the way, what should I call you? I like knowing whose chaos I'm taming.",
                 );
             }
+            self.start_next_queued_prompt();
         } else {
-            if streaming.text.is_empty() {
+            // While a tool follow-up call is in flight, the bubble already
+            // shows the raw tool result as a meaningful interim answer —
+            // don't blank it out with "..." dots until the model actually
+            // starts streaming its rephrased reply.
+            if streaming.text.is_empty() && streaming.tool_followup.is_none() {
                 let dots = self
                     .response_started_at
                     .map(|started| (started.elapsed().as_millis() / 350 % 3) + 1)
@@ -792,7 +1099,7 @@ impl DonnaApp {
     }
 
     fn poll_microsoft_sync_worker(&mut self) {
-        self.refresh_microsoft_sync_status();
+        self.refresh_activity_status_throttled();
         let Some(receiver) = self.microsoft_sync_receiver.as_ref() else {
             return;
         };
@@ -807,7 +1114,7 @@ impl DonnaApp {
         if let Some(result) = result {
             self.microsoft_sync_in_progress = false;
             self.microsoft_sync_receiver = None;
-            self.refresh_microsoft_sync_status();
+            self.refresh_activity_status();
             match result {
                 Ok(()) => eprintln!("donna ui: Microsoft sync worker finished"),
                 Err(error) => {
@@ -818,9 +1125,24 @@ impl DonnaApp {
         }
     }
 
-    fn refresh_microsoft_sync_status(&mut self) {
+    /// Reads Microsoft sync progress and the running-task count from SQLite
+    /// at most once per [`ACTIVITY_STATUS_REFRESH_INTERVAL`], since this is
+    /// otherwise called every UI frame and these values rarely change that
+    /// fast — keeping database work off the per-frame hot path avoids the
+    /// UI stalling on synchronous SQLite reads while a background job is
+    /// also writing to the same database.
+    fn refresh_activity_status_throttled(&mut self) {
+        if self.last_activity_status_refresh.elapsed() < ACTIVITY_STATUS_REFRESH_INTERVAL {
+            return;
+        }
+        self.last_activity_status_refresh = Instant::now();
+        self.refresh_activity_status();
+    }
+
+    fn refresh_activity_status(&mut self) {
         let Some(store) = self.store.as_ref() else {
             self.microsoft_sync_status = MicrosoftSyncUiStatus::default();
+            self.running_task_count = 0;
             return;
         };
 
@@ -829,6 +1151,7 @@ impl DonnaApp {
             teams_percent: Self::runtime_percent(store, "microsoft.sync.progress.teams"),
             calendar_percent: Self::runtime_percent(store, "microsoft.sync.progress.calendar"),
         };
+        self.running_task_count = store.running_task_run_count().unwrap_or(0);
     }
 
     fn runtime_percent(store: &LocalStore, key: &str) -> u8 {
@@ -966,6 +1289,66 @@ fn fallback_welcome_message() -> String {
         .unwrap_or_else(|| "Donna is ready.".to_owned())
 }
 
+/// Builds the compact second round-trip request that hands a tool's raw
+/// output back to the model so it can phrase the final answer. Deliberately
+/// skips the full system prompt, tool catalog, and chat history that the
+/// first round-trip sends: local models are slow and have a small context
+/// window, so keeping this request minimal keeps the extra round-trip cheap.
+fn build_tool_followup_request(user_message: &str, tool_result: &str) -> AiRequest {
+    let content = format!("The user asked: \"{user_message}\"\n\nTool result:\n{tool_result}");
+    AiRequest::new(TOOL_RESULT_FOLLOWUP_PROMPT.to_owned())
+        .with_message(AiMessage::trusted(AiRole::User, content))
+}
+
+/// True when text still looks like a tool call (JSON-ish) rather than the
+/// prose reply the follow-up prompt asked for. Local models sometimes ignore
+/// the "don't call a tool" instruction on the second round-trip; this is a
+/// cheap syntactic check (not a real parse, to avoid re-executing a tool
+/// call and risking a duplicate side effect for mutating tools).
+/// Removes any "[event_id: N]" reference tags before showing a message to
+/// the user — see `tag_calendar_followup_with_event_id`. The tag stays in
+/// the stored message text (that's what lets a later turn resolve "that
+/// meeting" deterministically), but it's an internal handle, never something
+/// the user should see.
+fn strip_event_reference_tags(text: &str) -> String {
+    const PREFIX: &str = "[event_id: ";
+    if !text.contains(PREFIX) {
+        return text.to_owned();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(PREFIX) {
+        result.push_str(rest[..start].trim_end_matches(' '));
+        let after = &rest[start + PREFIX.len()..];
+        rest = match after.find(']') {
+            Some(end) => &after[end + 1..],
+            None => break,
+        };
+    }
+    result.push_str(rest);
+    result.trim_end().to_owned()
+}
+
+fn looks_like_tool_call_json(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with('{') || trimmed.contains("```json") || trimmed.contains("\"arguments\"")
+}
+
+/// Picks the text to show after the tool follow-up round-trip: the model's
+/// rephrased answer if it looks like a genuine reply, otherwise the raw tool
+/// result as a safe fallback (empty response, or the model repeating a tool
+/// call instead of prose). When the answer is about a calendar appointment,
+/// also tags it with that appointment's event_id (see
+/// `tag_calendar_followup_with_event_id`) so a later follow-up can resolve
+/// "that meeting" deterministically instead of re-guessing search filters.
+fn finalize_tool_followup_text(model_text: String, raw_tool_result: &str) -> String {
+    let trimmed = model_text.trim();
+    if trimmed.is_empty() || looks_like_tool_call_json(trimmed) {
+        return raw_tool_result.to_owned();
+    }
+    tag_calendar_followup_with_event_id(trimmed.to_owned(), raw_tool_result)
+}
+
 fn run_chat_worker(
     selection: donna_ai::ProviderSelection,
     request: AiRequest,
@@ -1043,6 +1426,7 @@ impl eframe::App for DonnaApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_wakeup_ipc(ctx);
         self.poll_chat_worker(ctx);
+        self.poll_model_warmup();
         self.poll_microsoft_sync_worker();
         self.run_due_microsoft_sync();
         self.run_due_local_tasks();
@@ -1098,6 +1482,19 @@ fn unix_now_seconds() -> Option<i64> {
     i64::try_from(seconds).ok()
 }
 
+fn current_date_time_line(now: i64) -> String {
+    let days = now.div_euclid(86_400);
+    let seconds_of_day = now.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day / 60) % 60;
+    let second = seconds_of_day % 60;
+    let weekday = WEEKDAY_NAMES[((days + 4).rem_euclid(7)) as usize];
+    format!(
+        "Current date and time (UTC): {year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z ({weekday}). Current unix timestamp (seconds since epoch): {now}."
+    )
+}
+
 fn cron_datetime_from_unix(seconds: i64) -> CronDateTime {
     let days = seconds.div_euclid(86_400);
     let seconds_of_day = seconds.rem_euclid(86_400);
@@ -1109,30 +1506,6 @@ fn cron_datetime_from_unix(seconds: i64) -> CronDateTime {
         month,
         day_of_week: ((days + 4).rem_euclid(7)) as u8,
     }
-}
-
-fn hide_with_compositor() -> bool {
-    if std::env::var_os("SWAYSOCK").is_some() {
-        return command_succeeds("swaymsg", &[r#"[app_id="donna"] move scratchpad"#]);
-    }
-    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
-        return command_succeeds(
-            "hyprctl",
-            &["dispatch", "movetoworkspacesilent", "special:donna"],
-        );
-    }
-
-    false
-}
-
-fn command_succeeds(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 fn normalize_task_name(name: &str) -> String {
@@ -1155,7 +1528,10 @@ fn civil_from_days(days: i64) -> (i32, u8, u8) {
 
 impl DonnaApp {
     fn render_avatar(&mut self, ui: &mut egui::Ui, size: Vec2) {
-        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        if response.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
         let character = self.config.avatar.character.as_str();
 
         if let Some(texture) =
@@ -1225,6 +1601,7 @@ impl DonnaApp {
         } else {
             0.0
         };
+        let mut prompt_to_cancel = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(true)
@@ -1232,13 +1609,22 @@ impl DonnaApp {
             .show(&mut chat_ui, |ui| {
                 ui.set_width(inner_size.x);
                 for message in self.chat.messages() {
-                    render_message(
+                    let queued = self
+                        .queued_prompts
+                        .iter()
+                        .any(|queued| queued.message_id == message.id);
+                    let display_text = strip_event_reference_tags(&message.text);
+                    let cancelled = render_message(
                         ui,
                         message.speaker,
-                        &message.text,
+                        &display_text,
                         inner_size.x,
                         &self.config,
+                        queued,
                     );
+                    if cancelled {
+                        prompt_to_cancel = Some(message.id);
+                    }
                     ui.add_space(8.0);
                 }
 
@@ -1257,6 +1643,9 @@ impl DonnaApp {
                     inner_size.x,
                 );
             });
+        if let Some(message_id) = prompt_to_cancel {
+            self.cancel_queued_prompt(message_id);
+        }
 
         chat_ui.separator();
         chat_ui.allocate_ui_with_layout(

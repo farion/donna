@@ -16,9 +16,9 @@ mod repositories_tests;
 pub use audit::{AuditEntry, NewAuditEntry};
 pub use connection::{LocalStore, StorageError};
 pub use types::{
-    AttentionItem, CalendarEvent, DataFreshness, FollowUp, NewAttentionItem, NewCalendarEvent,
-    NewFollowUp, NewMemory, NewNoteMetadata, NewOutlookMessage, NewPerson, NewSyncState,
-    NewTaskFinding, NewTaskRun, NewTeamsMessage, NewTodo, NoteMetadata, OutlookMessage, Person,
-    SearchContentTrust, SearchQuery, SearchResult, StoredMemory, StoredTodo, SyncState,
-    TaskFinding, TaskRun, TeamsMessage,
+    AttentionItem, CalendarAttendee, CalendarEvent, DataFreshness, FollowUp, NewAttentionItem,
+    NewCalendarEvent, NewFollowUp, NewMemory, NewNoteMetadata, NewOutlookMessage, NewPerson,
+    NewSyncState, NewTaskFinding, NewTaskRun, NewTeamsMessage, NewTodo, NoteMetadata,
+    OutlookMessage, Person, SearchContentTrust, SearchQuery, SearchResult, StoredMemory,
+    StoredTodo, SyncState, TaskFinding, TaskRun, TeamsMessage,
 };

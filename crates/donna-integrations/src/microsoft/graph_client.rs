@@ -1,13 +1,17 @@
-use crate::microsoft::auth::MicrosoftTokenSet;
+use crate::microsoft::auth::{MicrosoftTokenSet, percent_encode};
 use crate::microsoft::calendar::CALENDAR_SOURCE;
 use crate::microsoft::error::GraphError;
 use crate::microsoft::outlook::OUTLOOK_MAIL_SOURCE;
 use crate::microsoft::teams::{TEAMS_CHANNEL_SOURCE, TEAMS_CHAT_SOURCE};
 use donna_config::MicrosoftConfig;
-use donna_storage::{LocalStore, NewCalendarEvent, NewOutlookMessage, NewSyncState, NewTeamsMessage};
+use donna_storage::{
+    CalendarAttendee, LocalStore, NewCalendarEvent, NewOutlookMessage, NewSyncState,
+    NewTeamsMessage,
+};
 use reqwest::blocking::Client;
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DAY_SECONDS: i64 = 86_400;
@@ -32,13 +36,8 @@ pub struct GraphSyncClient {
 
 impl GraphSyncClient {
     pub fn new(tokens: &MicrosoftTokenSet, config: &MicrosoftConfig) -> Self {
-        let http = Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| Client::new());
         Self {
-            http,
+            http: shared_http_client().clone(),
             access_token: tokens.access_token.clone(),
             teams_activity_window_days: config.teams_activity_window_days,
         }
@@ -298,11 +297,14 @@ impl GraphSyncClient {
             .and_then(|state| state.cursor.clone().or_else(|| state.delta_link.clone()))
             .unwrap_or_else(|| {
                 format!(
-                    "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime={}&endDateTime={}",
+                    "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime={}&endDateTime={}&$select=id,subject,organizer,start,end,originalStartTimeZone,showAs,isCancelled,changeKey,attendees,isAllDay",
                     format_graph_time(start),
                     format_graph_time(end)
                 )
             });
+
+        let mut backfill_attempted = 0usize;
+        let mut backfill_recovered = 0usize;
 
         let event_count = self.process_pages::<GraphCalendarEvent, _>(
             store,
@@ -311,13 +313,26 @@ impl GraphSyncClient {
             initial_url,
             None,
             |item| {
+                let (subject, organizer) = if item.subject.is_none() {
+                    backfill_attempted += 1;
+                    let detail = self.backfill_calendar_event_detail(&item.id);
+                    if detail.as_ref().is_some_and(|detail| detail.subject.is_some()) {
+                        backfill_recovered += 1;
+                    }
+                    detail
+                        .map(|detail| (detail.subject, detail.organizer))
+                        .unwrap_or((None, item.organizer.clone()))
+                } else {
+                    (item.subject, item.organizer.clone())
+                };
+
                 store.upsert_calendar_event(&NewCalendarEvent {
                     external_id: item.id,
-                    subject: item.subject,
-                    organizer_name: item.organizer.as_ref().and_then(|organizer| {
+                    subject,
+                    organizer_name: organizer.as_ref().and_then(|organizer| {
                         organizer.email_address.as_ref().and_then(|e| e.name.clone())
                     }),
-                    organizer_email: item.organizer.as_ref().and_then(|organizer| {
+                    organizer_email: organizer.as_ref().and_then(|organizer| {
                         organizer.email_address.as_ref().and_then(|e| e.address.clone())
                     }),
                     starts_at: item
@@ -336,6 +351,12 @@ impl GraphSyncClient {
                     change_key: item.change_key,
                     is_cancelled: item.is_cancelled.unwrap_or(false),
                     is_deleted: false,
+                    is_all_day: item.is_all_day.unwrap_or(false),
+                    attendees: item
+                        .attendees
+                        .into_iter()
+                        .filter_map(GraphAttendee::into_calendar_attendee)
+                        .collect::<Vec<CalendarAttendee>>(),
                 })?;
                 Ok(())
             },
@@ -349,10 +370,40 @@ impl GraphSyncClient {
             0
         };
         eprintln!(
-            "donna microsoft sync: calendar done (fetched={event_count}, pruned={pruned})"
+            "donna microsoft sync: calendar done (fetched={event_count}, pruned={pruned}, \
+             subject_backfill_attempts={backfill_attempted}, subject_backfill_recovered={backfill_recovered})"
         );
         let _ = store.set_runtime_state(CALENDAR_PROGRESS_KEY, "100");
         Ok(())
+    }
+
+    /// Microsoft Graph's `calendarView/delta` can omit `subject` (and other
+    /// properties) for recurring-event occurrences even when `$select`
+    /// explicitly requests it — a known Graph limitation, not a client bug.
+    /// Falling back to a direct per-event GET reliably returns full
+    /// properties for that same occurrence id.
+    fn backfill_calendar_event_detail(&self, event_id: &str) -> Option<GraphCalendarEventDetail> {
+        let url = format!(
+            "https://graph.microsoft.com/v1.0/me/events/{}?$select=subject,organizer",
+            percent_encode(event_id)
+        );
+        match self.get::<GraphCalendarEventDetail>(&url) {
+            Ok(detail) if detail.subject.is_none() => {
+                eprintln!(
+                    "donna microsoft sync: calendar event subject backfill for {event_id} \
+                     succeeded but Graph returned no subject (event genuinely has none, or is \
+                     restricted by sensitivity)"
+                );
+                Some(detail)
+            }
+            Ok(detail) => Some(detail),
+            Err(error) => {
+                eprintln!(
+                    "donna microsoft sync: calendar event subject backfill failed for {event_id}: {error}"
+                );
+                None
+            }
+        }
     }
 
     fn teams_activity_cutoff(&self) -> Result<i64, GraphError> {
@@ -873,6 +924,24 @@ pub fn mark_stale(store: &LocalStore, source: &str, reason: &str) -> Result<(), 
     Ok(())
 }
 
+/// A `reqwest::blocking::Client` owns a dedicated background thread for as
+/// long as it's alive. `GraphSyncClient::new` used to build a fresh one on
+/// every call, and since a full Microsoft sync runs once a minute in the
+/// background, that churned a new thread every minute that wasn't guaranteed
+/// to wind down before the next one was created. Build the underlying
+/// client once and clone it (an `Arc` clone, not a new thread) into each
+/// `GraphSyncClient`.
+pub(crate) fn shared_http_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new())
+    })
+}
+
 fn now_seconds() -> Result<i64, GraphError> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
     Ok(elapsed.as_secs() as i64)
@@ -1081,17 +1150,24 @@ struct GraphMail {
     change_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphSender {
     email_address: Option<GraphEmailAddress>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GraphEmailAddress {
     name: Option<String>,
     address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphCalendarEventDetail {
+    subject: Option<String>,
+    organizer: Option<GraphSender>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1148,9 +1224,34 @@ struct GraphCalendarEvent {
     original_start_time_zone: Option<String>,
     show_as: Option<String>,
     is_cancelled: Option<bool>,
+    is_all_day: Option<bool>,
+    #[serde(default)]
+    attendees: Vec<GraphAttendee>,
     #[serde(rename = "@odata.etag")]
     etag: Option<String>,
     change_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphAttendee {
+    email_address: Option<GraphEmailAddress>,
+    #[serde(rename = "type")]
+    attendee_type: Option<String>,
+}
+
+impl GraphAttendee {
+    fn into_calendar_attendee(self) -> Option<CalendarAttendee> {
+        let email_address = self.email_address?;
+        if email_address.name.is_none() && email_address.address.is_none() {
+            return None;
+        }
+        Some(CalendarAttendee {
+            name: email_address.name,
+            email: email_address.address,
+            is_optional: self.attendee_type.as_deref() == Some("optional"),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]

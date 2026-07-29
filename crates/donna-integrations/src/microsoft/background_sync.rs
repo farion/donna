@@ -1,13 +1,12 @@
 use crate::microsoft::auth::{load_microsoft_tokens, store_microsoft_tokens};
 use crate::microsoft::calendar::CALENDAR_SOURCE;
 use crate::microsoft::error::GraphError;
-use crate::microsoft::graph_client::{GraphSyncClient, mark_stale};
+use crate::microsoft::graph_client::{GraphSyncClient, mark_stale, shared_http_client};
 use crate::microsoft::outlook::OUTLOOK_MAIL_SOURCE;
 use crate::microsoft::teams::{TEAMS_CHANNEL_SOURCE, TEAMS_CHAT_SOURCE};
 use crate::secrets::SecretStore;
 use donna_config::AppConfig;
 use donna_storage::LocalStore;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 const TOKEN_URL_TEMPLATE: &str = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token";
@@ -107,7 +106,7 @@ fn refresh_tokens(
         ));
     }
     let scope = scopes.join(" ");
-    let response = Client::new()
+    let response = shared_http_client()
         .post(TOKEN_URL_TEMPLATE.replace("{tenant_id}", tenant_id))
         .form(&[
             ("grant_type", "refresh_token"),

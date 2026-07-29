@@ -8,7 +8,7 @@ const DAY_SECONDS: i64 = 86_400;
 pub(super) fn execute(store: &LocalStore, call: &ModelToolCall) -> String {
     let arguments = normalized_call_arguments(call);
     let Some(person) = string_argument(&arguments, &["person", "name", "contact"]) else {
-        return "Tell me the person name to summarize (for example: Dennis Mungenast).".to_owned();
+        return "Tell me the person name to summarize (for example: Alex Example).".to_owned();
     };
 
     let cutoff = now_seconds() - (LOOKBACK_DAYS * DAY_SECONDS);

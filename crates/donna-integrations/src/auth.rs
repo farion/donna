@@ -115,6 +115,7 @@ fn configure_secret_model(
             .and_then(|model| model.secret_ref.as_deref())
             .unwrap_or(defaults.secret_ref),
     )?;
+    let context_length = existing.and_then(|model| model.context_length);
     let auth_method = prompt_secret_auth_method(defaults.auth_kind)?;
 
     upsert_model(
@@ -126,6 +127,7 @@ fn configure_secret_model(
             model: model_name,
             base_url: Some(base_url),
             secret_ref: Some(secret_ref.clone()),
+            context_length,
         },
     );
     if prompt_yes_no("Use this provider as the selected chat model", true)? {
@@ -171,6 +173,7 @@ fn configure_ollama(config_path: &Path) -> Result<(), AuthWizardError> {
             .map(|model| model.model.as_str())
             .unwrap_or("llama3.1"),
     )?;
+    let context_length = existing.and_then(|model| model.context_length).or(Some(8192));
 
     upsert_model(
         &mut config,
@@ -181,6 +184,7 @@ fn configure_ollama(config_path: &Path) -> Result<(), AuthWizardError> {
             model: model_name,
             base_url: Some(base_url),
             secret_ref: None,
+            context_length,
         },
     );
     if prompt_yes_no("Use Ollama as the selected chat model", true)? {
@@ -384,6 +388,7 @@ mod tests {
                 model: "gpt-4.1".to_owned(),
                 base_url: Some("https://example.test/v1".to_owned()),
                 secret_ref: Some("donna/test-openai".to_owned()),
+                context_length: None,
             },
         );
 

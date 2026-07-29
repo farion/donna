@@ -6,6 +6,29 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 
 #[test]
+fn current_date_time_line_formats_utc_iso_date_and_epoch() {
+    // 2024-04-07T00:00:00Z, a Sunday.
+    let line = current_date_time_line(1_712_448_000);
+
+    assert_eq!(
+        line,
+        "Current date and time (UTC): 2024-04-07T00:00:00Z (Sunday). Current unix timestamp (seconds since epoch): 1712448000."
+    );
+}
+
+#[test]
+fn system_prompt_includes_current_date_time_context() {
+    let (_config_dir, mut harness) = app_harness(Vec2::new(720.0, 480.0));
+
+    let system_prompt = harness
+        .state_mut()
+        .system_prompt_with_memories("base".to_owned());
+
+    assert!(system_prompt.contains("Current Date And Time"));
+    assert!(system_prompt.contains("Current unix timestamp (seconds since epoch):"));
+}
+
+#[test]
 fn hide_command_hides_window_without_stopping_app() {
     let (_config_dir, mut harness) = app_harness(Vec2::new(720.0, 480.0));
     submit_text(&mut harness, "/hide");
@@ -120,6 +143,7 @@ fn chat_message_uses_selected_ai_provider() {
             model: "mock".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let initial_count = harness.state().chat.messages().len();
@@ -144,6 +168,94 @@ fn chat_message_uses_selected_ai_provider() {
 }
 
 #[test]
+fn message_submitted_while_thinking_is_queued_not_dropped() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-chat".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-chat".to_owned(),
+            label: "Mock chat".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+            context_length: None,
+        });
+    });
+
+    submit_text(&mut harness, "first");
+    assert!(harness.state().response_in_progress);
+
+    submit_text(&mut harness, "second");
+    assert!(
+        harness
+            .state()
+            .chat
+            .messages()
+            .iter()
+            .any(|message| message.text == "second"),
+        "queued message must appear in the transcript immediately"
+    );
+    assert_eq!(harness.state().queued_prompts.len(), 1);
+
+    harness.run_steps(30);
+
+    assert!(harness.state().queued_prompts.is_empty());
+    assert!(!harness.state().response_in_progress);
+    let messages = harness.state().chat.messages();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.text == "Mock response")
+            .count(),
+        2,
+        "both the original and the queued message must get answered"
+    );
+}
+
+#[test]
+fn cancelling_a_queued_prompt_removes_its_bubble_and_skips_it() {
+    let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
+        config.ai.chat.selected_model = "mock-chat".to_owned();
+        config.ai.models.push(ModelConfig {
+            id: "mock-chat".to_owned(),
+            label: "Mock chat".to_owned(),
+            provider: "mock".to_owned(),
+            model: "mock".to_owned(),
+            base_url: Some("mock://local".to_owned()),
+            secret_ref: None,
+            context_length: None,
+        });
+    });
+
+    submit_text(&mut harness, "first");
+    submit_text(&mut harness, "cancel me");
+    let queued_id = harness
+        .state()
+        .chat
+        .messages()
+        .iter()
+        .find(|message| message.text == "cancel me")
+        .map(|message| message.id)
+        .expect("queued message bubble");
+
+    harness.state_mut().cancel_queued_prompt(queued_id);
+
+    assert!(harness.state().queued_prompts.is_empty());
+    assert!(
+        !harness
+            .state()
+            .chat
+            .messages()
+            .iter()
+            .any(|message| message.text == "cancel me"),
+        "cancelled bubble must be removed from the transcript"
+    );
+
+    harness.run_steps(30);
+    assert!(!harness.state().response_in_progress);
+}
+
+#[test]
 fn asks_for_name_after_response_when_unknown() {
     let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
         config.ai.chat.selected_model = "mock-chat".to_owned();
@@ -154,6 +266,7 @@ fn asks_for_name_after_response_when_unknown() {
             model: "mock".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -183,6 +296,7 @@ fn does_not_ask_for_name_after_user_provides_it() {
             model: "mock".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -210,6 +324,7 @@ fn chat_prompt_includes_persisted_memories() {
             model: "mock".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -249,6 +364,7 @@ fn todo_query_without_open_todos_uses_model_tool() {
             model: "mock-response:{\"tool\":\"list_open_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let initial_count = harness.state().chat.messages().len();
@@ -277,6 +393,7 @@ fn what_do_i_need_to_do_is_query_not_new_todo() {
             model: "mock-response:{\"tool\":\"list_open_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -306,6 +423,7 @@ fn todo_query_tool_lists_only_stored_open_todos() {
             model: "mock-response:{\"tool\":\"list_open_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     harness
@@ -350,6 +468,7 @@ fn chat_can_change_open_todo_severity() {
             model: "mock-response:{\"tool\":\"update_todo_severity\",\"arguments\":{\"todo_id\":1,\"severity\":\"high\"}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let todo = harness
@@ -394,6 +513,7 @@ fn chat_can_complete_existing_todo_and_create_another() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let old = harness
@@ -437,6 +557,7 @@ fn chat_can_delete_todo() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let todo = harness
@@ -485,6 +606,7 @@ fn chat_can_complete_todo_with_common_tool_call_variants() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let todo = harness
@@ -522,6 +644,7 @@ fn chat_can_delete_todo_with_top_level_id() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let todo = harness
@@ -561,6 +684,7 @@ fn normal_todo_listing_excludes_done_todos() {
             model: "mock-response:{\"tool\":\"list_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let store = harness.state().store.as_ref().expect("store");
@@ -600,6 +724,7 @@ fn explicit_completed_todo_listing_shows_done_todos() {
             model: "mock-response:{\"tool\":\"list_completed_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let store = harness.state().store.as_ref().expect("store");
@@ -639,6 +764,7 @@ fn singular_completed_todo_listing_alias_shows_done_todos() {
             model: "mock-response:{\"tool\":\"list_completed_todo\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let store = harness.state().store.as_ref().expect("store");
@@ -706,6 +832,7 @@ fn create_todo_tool_rejects_ungrounded_title() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -731,6 +858,7 @@ fn create_todo_tool_persists_due_at() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -757,6 +885,7 @@ fn update_todo_due_at_tool_changes_existing_todo() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let todo = harness
@@ -795,6 +924,7 @@ fn raw_todo_context_response_is_rendered_as_human_text() {
             model: "mock-response:id=1 severity=high title=fix typo".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     harness
@@ -842,6 +972,7 @@ fn bullet_raw_todo_context_response_is_rendered_as_human_text() {
             model: "mock-response:- id=2 severity=high title=fix typo\n- id=2 severity=low title=review Markus' cloud article".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     harness
@@ -891,6 +1022,7 @@ fn generic_create_todo_phrase_is_rejected_not_reinterpreted() {
             model: format!("mock-response:{tool_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let todo = harness
@@ -935,6 +1067,7 @@ fn chat_can_answer_open_todo_severity() {
             model: "mock-response:{\"tool\":\"list_open_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     harness
@@ -971,6 +1104,7 @@ fn model_tool_lists_open_todos_with_severity() {
             model: "mock-response:{\"tool\":\"list_open_todos\",\"arguments\":{}}".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     let store = harness.state().store.as_ref().expect("store");
@@ -1015,6 +1149,7 @@ fn embedded_tool_call_response_is_rendered_as_human_text() {
             model: format!("mock-response:{model_reply}"),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
     harness
@@ -1092,6 +1227,7 @@ fn chat_submission_enters_thinking_state_before_response_finishes() {
             model: "mock".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 
@@ -1137,7 +1273,7 @@ fn thinking_chat_placeholder_uses_only_animated_dots() {
 }
 
 #[test]
-fn ollama_unavailable_shows_inline_chat_error() {
+fn ollama_unavailable_shows_error_as_notice_not_chat_bubble() {
     let (_config_dir, mut harness) = app_harness_with_config(Vec2::new(720.0, 480.0), |config| {
         let model = config
             .ai
@@ -1154,10 +1290,18 @@ fn ollama_unavailable_shows_inline_chat_error() {
     assert!(
         harness
             .state()
+            .config_notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("Ollama local could not answer")),
+    );
+    assert!(
+        !harness
+            .state()
             .chat
             .messages()
             .iter()
             .any(|message| message.text.contains("Ollama local could not answer")),
+        "provider errors must not appear as a chat bubble",
     );
 }
 

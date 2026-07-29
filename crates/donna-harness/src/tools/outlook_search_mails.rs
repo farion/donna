@@ -56,8 +56,8 @@ fn format_exact_mail(mail: &donna_storage::OutlookMessage) -> String {
         output.push_str(body_preview);
     }
     if let Some(received_at) = mail.received_at {
-        output.push_str("\n- ReceivedAt: ");
-        output.push_str(&received_at.to_string());
+        output.push_str("\n- Received: ");
+        output.push_str(&donna_core::time::format_unix_timestamp_human(received_at));
     }
     output
 }

@@ -1,7 +1,7 @@
 use crate::storage::connection::{LocalStore, StorageError, now_seconds};
 use crate::storage::types::{
-    CalendarEvent, NewCalendarEvent, NewOutlookMessage, NewTeamsMessage, OutlookMessage,
-    TeamsMessage,
+    CalendarAttendee, CalendarEvent, NewCalendarEvent, NewOutlookMessage, NewTeamsMessage,
+    OutlookMessage, TeamsMessage,
 };
 use rusqlite::types::Value;
 use rusqlite::{Row, params, params_from_iter};
@@ -153,8 +153,8 @@ impl LocalStore {
             "INSERT INTO calendar_events (
                 external_id, subject, organizer_name, organizer_email, starts_at,
                 ends_at, original_timezone, show_as, synced_at, etag, change_key,
-                is_cancelled, is_deleted
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                is_cancelled, is_deleted, is_all_day
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(external_id) DO UPDATE SET
                 subject = excluded.subject,
                 organizer_name = excluded.organizer_name,
@@ -167,7 +167,8 @@ impl LocalStore {
                 etag = excluded.etag,
                 change_key = excluded.change_key,
                 is_cancelled = excluded.is_cancelled,
-                is_deleted = excluded.is_deleted",
+                is_deleted = excluded.is_deleted,
+                is_all_day = excluded.is_all_day",
             params![
                 &input.external_id,
                 &input.subject,
@@ -182,10 +183,14 @@ impl LocalStore {
                 &input.change_key,
                 input.is_cancelled as i64,
                 input.is_deleted as i64,
+                input.is_all_day as i64,
             ],
         )?;
 
-        let event = self.calendar_event_by_external_id(&input.external_id)?;
+        let mut event = self.calendar_event_by_external_id(&input.external_id)?;
+        self.replace_calendar_event_attendees(event.id, &input.attendees)?;
+        event.attendees = input.attendees.clone();
+
         if event.is_deleted || event.is_cancelled {
             self.delete_search_record("calendar_event", event.id)?;
         } else {
@@ -200,21 +205,103 @@ impl LocalStore {
         Ok(event)
     }
 
+    /// Replaces the full attendee list for a synced event — attendees have
+    /// no stable per-row external id from Graph, so each sync just clears
+    /// and re-inserts the current set rather than diffing.
+    fn replace_calendar_event_attendees(
+        &self,
+        calendar_event_id: i64,
+        attendees: &[CalendarAttendee],
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "DELETE FROM calendar_event_attendees WHERE calendar_event_id = ?1",
+            [calendar_event_id],
+        )?;
+        for attendee in attendees {
+            self.connection.execute(
+                "INSERT INTO calendar_event_attendees (calendar_event_id, name, email, is_optional)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(calendar_event_id, email) DO UPDATE SET
+                    name = excluded.name,
+                    is_optional = excluded.is_optional",
+                params![
+                    calendar_event_id,
+                    &attendee.name,
+                    &attendee.email,
+                    attendee.is_optional as i64,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn calendar_event_by_external_id(
         &self,
         external_id: &str,
     ) -> Result<CalendarEvent, StorageError> {
-        self.connection
+        let mut event: CalendarEvent = self
+            .connection
             .query_row(
                 "SELECT id, external_id, subject, organizer_name, organizer_email,
                     starts_at, ends_at, original_timezone, show_as, synced_at,
-                    etag, change_key, is_cancelled, is_deleted
+                    etag, change_key, is_cancelled, is_deleted, is_all_day
                  FROM calendar_events
                  WHERE external_id = ?1",
                 [external_id],
                 calendar_event_from_row,
             )
-            .map_err(StorageError::from)
+            .map_err(StorageError::from)?;
+        event.attendees = self.calendar_event_attendees(event.id)?;
+        Ok(event)
+    }
+
+    /// Attendees for a single synced calendar event, in the order Microsoft
+    /// Graph returned them.
+    pub fn calendar_event_attendees(
+        &self,
+        calendar_event_id: i64,
+    ) -> Result<Vec<CalendarAttendee>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT name, email, is_optional
+             FROM calendar_event_attendees
+             WHERE calendar_event_id = ?1
+             ORDER BY id",
+        )?;
+        let attendees = statement
+            .query_map([calendar_event_id], calendar_attendee_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(attendees)
+    }
+
+    fn with_attendees(
+        &self,
+        mut events: Vec<CalendarEvent>,
+    ) -> Result<Vec<CalendarEvent>, StorageError> {
+        for event in &mut events {
+            event.attendees = self.calendar_event_attendees(event.id)?;
+        }
+        Ok(events)
+    }
+
+    /// Looks up a single synced event by its local id — the id a prior tool
+    /// result surfaced to the model — so a follow-up question about "that
+    /// meeting" can be answered by direct lookup instead of a fresh,
+    /// potentially ambiguous text/date search.
+    pub fn calendar_event_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<CalendarEvent>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, external_id, subject, organizer_name, organizer_email,
+                starts_at, ends_at, original_timezone, show_as, synced_at,
+                etag, change_key, is_cancelled, is_deleted, is_all_day
+             FROM calendar_events
+             WHERE id = ?1 AND is_deleted = 0 AND is_cancelled = 0",
+        )?;
+        let events = statement
+            .query_map([id], calendar_event_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.with_attendees(events)?.into_iter().next())
     }
 
     pub fn calendar_collisions(
@@ -229,7 +316,7 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id, external_id, subject, organizer_name, organizer_email,
                 starts_at, ends_at, original_timezone, show_as, synced_at,
-                etag, change_key, is_cancelled, is_deleted
+                etag, change_key, is_cancelled, is_deleted, is_all_day
              FROM calendar_events
              WHERE is_cancelled = 0
                 AND is_deleted = 0
@@ -244,7 +331,7 @@ impl LocalStore {
         let events = statement
             .query_map(params![starts_at, ends_at], calendar_event_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(events)
+        self.with_attendees(events)
     }
 
     pub fn prune_outlook_messages_before(&self, cutoff_received_at: i64) -> Result<usize, StorageError> {
@@ -358,7 +445,7 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id, external_id, subject, organizer_name, organizer_email,
                 starts_at, ends_at, original_timezone, show_as, synced_at,
-                etag, change_key, is_cancelled, is_deleted
+                etag, change_key, is_cancelled, is_deleted, is_all_day
              FROM calendar_events
              WHERE is_cancelled = 0
                 AND is_deleted = 0
@@ -366,6 +453,9 @@ impl LocalStore {
                 AND ends_at IS NOT NULL
                 AND starts_at < ?1
                 AND ends_at > ?2
+                AND lower(coalesce(show_as, 'busy')) IN ('busy', 'tentative', 'oof')
+                AND is_all_day = 0
+                AND NOT (subject IS NULL AND organizer_name IS NULL AND organizer_email IS NULL)
              ORDER BY starts_at ASC
              LIMIT ?3",
         )?;
@@ -376,7 +466,7 @@ impl LocalStore {
                 calendar_event_from_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(events)
+        self.with_attendees(events)
     }
 
     pub fn list_outlook_messages(
@@ -596,9 +686,10 @@ impl LocalStore {
         let mut sql = String::from(
             "SELECT id, external_id, subject, organizer_name, organizer_email,
                 starts_at, ends_at, original_timezone, show_as, synced_at,
-                etag, change_key, is_cancelled, is_deleted
+                etag, change_key, is_cancelled, is_deleted, is_all_day
              FROM calendar_events
-             WHERE is_deleted = 0 AND is_cancelled = 0",
+             WHERE is_deleted = 0 AND is_cancelled = 0
+                AND NOT (subject IS NULL AND organizer_name IS NULL AND organizer_email IS NULL)",
         );
         let mut values = Vec::new();
 
@@ -618,7 +709,7 @@ impl LocalStore {
         let events = statement
             .query_map(params_from_iter(values.iter()), calendar_event_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(events)
+        self.with_attendees(events)
     }
 
     pub fn search_calendar_events(
@@ -632,21 +723,48 @@ impl LocalStore {
         let mut sql = String::from(
             "SELECT id, external_id, subject, organizer_name, organizer_email,
                 starts_at, ends_at, original_timezone, show_as, synced_at,
-                etag, change_key, is_cancelled, is_deleted
+                etag, change_key, is_cancelled, is_deleted, is_all_day
              FROM calendar_events
-             WHERE is_deleted = 0 AND is_cancelled = 0",
+             WHERE is_deleted = 0 AND is_cancelled = 0
+                AND NOT (subject IS NULL AND organizer_name IS NULL AND organizer_email IS NULL)",
         );
         let mut values = Vec::new();
 
+        // A local model unreliably splits a person's name between `text` and
+        // `people` — sometimes putting the name in `text` alone. Rather than
+        // relying on the model to pick the right field, both filters search
+        // every place a name could live: the organizer and the full
+        // attendee list, not just the subject line.
         if let Some(text) = text.filter(|value| !value.trim().is_empty()) {
-            sql.push_str(" AND lower(coalesce(subject, '')) LIKE ?");
-            values.push(Value::Text(format!("%{}%", text.trim().to_ascii_lowercase())));
+            let like = Value::Text(format!("%{}%", text.trim().to_ascii_lowercase()));
+            sql.push_str(
+                " AND (lower(coalesce(subject, '')) LIKE ?
+                    OR lower(coalesce(organizer_name, '')) LIKE ?
+                    OR lower(coalesce(organizer_email, '')) LIKE ?
+                    OR EXISTS (
+                        SELECT 1 FROM calendar_event_attendees a
+                        WHERE a.calendar_event_id = calendar_events.id
+                          AND (lower(coalesce(a.name, '')) LIKE ? OR lower(coalesce(a.email, '')) LIKE ?)
+                    ))",
+            );
+            for _ in 0..5 {
+                values.push(like.clone());
+            }
         }
         if let Some(people) = people.filter(|value| !value.trim().is_empty()) {
             let like = Value::Text(format!("%{}%", people.trim().to_ascii_lowercase()));
-            sql.push_str(" AND (lower(coalesce(organizer_name, '')) LIKE ? OR lower(coalesce(organizer_email, '')) LIKE ?)");
-            values.push(like.clone());
-            values.push(like);
+            sql.push_str(
+                " AND (lower(coalesce(organizer_name, '')) LIKE ?
+                    OR lower(coalesce(organizer_email, '')) LIKE ?
+                    OR EXISTS (
+                        SELECT 1 FROM calendar_event_attendees a
+                        WHERE a.calendar_event_id = calendar_events.id
+                          AND (lower(coalesce(a.name, '')) LIKE ? OR lower(coalesce(a.email, '')) LIKE ?)
+                    ))",
+            );
+            for _ in 0..4 {
+                values.push(like.clone());
+            }
         }
         if let Some(starts_after) = starts_after {
             sql.push_str(" AND starts_at IS NOT NULL AND starts_at >= ?");
@@ -664,7 +782,7 @@ impl LocalStore {
         let events = statement
             .query_map(params_from_iter(values.iter()), calendar_event_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(events)
+        self.with_attendees(events)
     }
 }
 
@@ -708,6 +826,7 @@ fn teams_message_from_row(row: &Row<'_>) -> rusqlite::Result<TeamsMessage> {
 fn calendar_event_from_row(row: &Row<'_>) -> rusqlite::Result<CalendarEvent> {
     let is_cancelled: i64 = row.get(12)?;
     let is_deleted: i64 = row.get(13)?;
+    let is_all_day: i64 = row.get(14)?;
     Ok(CalendarEvent {
         id: row.get(0)?,
         external_id: row.get(1)?,
@@ -723,5 +842,16 @@ fn calendar_event_from_row(row: &Row<'_>) -> rusqlite::Result<CalendarEvent> {
         change_key: row.get(11)?,
         is_cancelled: is_cancelled != 0,
         is_deleted: is_deleted != 0,
+        is_all_day: is_all_day != 0,
+        attendees: Vec::new(),
+    })
+}
+
+fn calendar_attendee_from_row(row: &Row<'_>) -> rusqlite::Result<CalendarAttendee> {
+    let is_optional: i64 = row.get(2)?;
+    Ok(CalendarAttendee {
+        name: row.get(0)?,
+        email: row.get(1)?,
+        is_optional: is_optional != 0,
     })
 }

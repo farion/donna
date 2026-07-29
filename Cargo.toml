@@ -26,6 +26,8 @@ epaint_default_fonts = "0.34"
 getrandom = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 keyring = { version = "3", features = ["sync-secret-service"] }
+libc = "0.2"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Time"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rpassword = "7"
 rusqlite = { version = "0.37", features = ["bundled"] }

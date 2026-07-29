@@ -295,6 +295,8 @@ pub(super) fn calendar_event(
         change_key: Some("change".to_owned()),
         is_cancelled,
         is_deleted,
+        is_all_day: false,
+        attendees: Vec::new(),
     }
 }
 

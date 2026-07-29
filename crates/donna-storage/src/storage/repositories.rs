@@ -413,6 +413,23 @@ impl LocalStore {
             .map_err(StorageError::from)
     }
 
+    /// Clears sync progress (cursor/delta_link) for a source, or every
+    /// source when `None`, so the next sync starts over from scratch
+    /// instead of resuming from where it left off. Returns the number of
+    /// sources cleared.
+    pub fn reset_sync_state(&self, source: Option<&str>) -> Result<usize, StorageError> {
+        match source {
+            Some(source) => self
+                .connection
+                .execute("DELETE FROM sync_state WHERE source = ?1", [source])
+                .map_err(StorageError::from),
+            None => self
+                .connection
+                .execute("DELETE FROM sync_state", [])
+                .map_err(StorageError::from),
+        }
+    }
+
     pub fn data_freshness(&self, source: &str) -> Result<DataFreshness, StorageError> {
         match self.sync_state(source)? {
             Some(state) if state.is_stale => Ok(DataFreshness::Stale {

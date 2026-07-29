@@ -128,6 +128,70 @@ fn stale_sync_state_is_visible() {
 }
 
 #[test]
+fn reset_sync_state_clears_a_single_source() {
+    let store = LocalStore::in_memory().expect("store");
+    store
+        .upsert_sync_state(&NewSyncState {
+            source: "calendar".to_owned(),
+            cursor: Some("cursor-1".to_owned()),
+            delta_link: None,
+            last_sync_at: Some(1_000),
+            last_error: None,
+            is_stale: false,
+        })
+        .expect("sync state");
+    store
+        .upsert_sync_state(&NewSyncState {
+            source: "teams.chat".to_owned(),
+            cursor: Some("cursor-2".to_owned()),
+            delta_link: None,
+            last_sync_at: Some(1_000),
+            last_error: None,
+            is_stale: false,
+        })
+        .expect("sync state");
+
+    let cleared = store
+        .reset_sync_state(Some("calendar"))
+        .expect("reset sync state");
+
+    assert_eq!(cleared, 1);
+    assert!(store.sync_state("calendar").expect("query").is_none());
+    assert!(store.sync_state("teams.chat").expect("query").is_some());
+}
+
+#[test]
+fn reset_sync_state_clears_every_source_when_none() {
+    let store = LocalStore::in_memory().expect("store");
+    store
+        .upsert_sync_state(&NewSyncState {
+            source: "calendar".to_owned(),
+            cursor: Some("cursor-1".to_owned()),
+            delta_link: None,
+            last_sync_at: Some(1_000),
+            last_error: None,
+            is_stale: false,
+        })
+        .expect("sync state");
+    store
+        .upsert_sync_state(&NewSyncState {
+            source: "teams.chat".to_owned(),
+            cursor: Some("cursor-2".to_owned()),
+            delta_link: None,
+            last_sync_at: Some(1_000),
+            last_error: None,
+            is_stale: false,
+        })
+        .expect("sync state");
+
+    let cleared = store.reset_sync_state(None).expect("reset sync state");
+
+    assert_eq!(cleared, 2);
+    assert!(store.sync_state("calendar").expect("query").is_none());
+    assert!(store.sync_state("teams.chat").expect("query").is_none());
+}
+
+#[test]
 fn corrects_memory_content_and_removes_forgotten_memory_from_search() {
     let store = LocalStore::in_memory().expect("store");
     let memory = store

@@ -1,8 +1,9 @@
 use donna_config::{AppConfig, UiThemeMode};
 use donna_core::chat::Speaker;
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Vec2,
+    self, Align, Button, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Vec2,
 };
+use egui_phosphor::regular::TRASH;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct UiPalette {
@@ -90,26 +91,36 @@ pub(super) fn palette_for(theme: egui::Theme) -> UiPalette {
     }
 }
 
+/// Renders one chat bubble. When `queued` is set (a prompt submitted while
+/// Donna was still answering a previous one, waiting its turn), the bubble
+/// is drawn translucent with a small "queued" label and a trash button the
+/// user can click to cancel it before it's sent — returns `true` exactly
+/// when that button was clicked this frame.
 pub(super) fn render_message(
     ui: &mut egui::Ui,
     speaker: Speaker,
     text: &str,
     chat_width: f32,
     config: &AppConfig,
-) {
+    queued: bool,
+) -> bool {
     let theme = ui.ctx().theme();
-    let color = match speaker {
+    let mut color = match speaker {
         Speaker::Donna => parse_hex_color(&config.ui.donna_message_color)
             .unwrap_or_else(|| default_message_color(speaker, theme)),
         Speaker::User => parse_hex_color(&config.ui.user_message_color)
             .unwrap_or_else(|| default_message_color(speaker, theme)),
     };
+    if queued {
+        color = color.gamma_multiply(0.55);
+    }
     let text_color = readable_text_color(color);
     let layout = match speaker {
         Speaker::Donna => Layout::left_to_right(Align::Min),
         Speaker::User => Layout::right_to_left(Align::Min),
     };
 
+    let mut cancelled = false;
     ui.with_layout(layout, |ui| {
         Frame::NONE
             .fill(color)
@@ -117,16 +128,35 @@ pub(super) fn render_message(
             .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
                 ui.set_max_width(chat_width * 0.72);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(text)
-                            .font(FontId::proportional(14.0))
-                            .color(text_color),
-                    )
-                    .wrap(),
-                );
+                ui.vertical(|ui| {
+                    if queued {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("queued")
+                                    .font(FontId::proportional(10.0))
+                                    .color(text_color.gamma_multiply(0.8)),
+                            );
+                            if ui
+                                .add(Button::new(RichText::new(TRASH).color(text_color)).frame(false))
+                                .on_hover_text("Cancel this queued message")
+                                .clicked()
+                            {
+                                cancelled = true;
+                            }
+                        });
+                    }
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(text)
+                                .font(FontId::proportional(14.0))
+                                .color(text_color),
+                        )
+                        .wrap(),
+                    );
+                });
             });
     });
+    cancelled
 }
 
 fn theme_preference(theme: UiThemeMode) -> egui::ThemePreference {

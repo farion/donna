@@ -53,6 +53,20 @@ Donna opens a desktop window titled `Donna`. On first launch it creates
 `~/.config/donna/donna.toml` on Linux and opens a SQLite database under
 `~/.local/share/donna/` unless you configure another path.
 
+## Command-Line Options
+
+Run `donna --help` for the full list. Available options:
+
+- `--auth` — run the Microsoft Graph / AI provider auth setup wizard.
+- `--wakeup` — wake and show an already-running hidden Donna instance.
+- `--reset-sync [TARGET]` — clear synced Microsoft data's sync progress so the
+  next start does a full resync instead of an incremental one. `TARGET` is
+  one of `all` (default), `calendar`, `outlook`, or `teams`. Use this if
+  synced data looks wrong or incomplete (see Troubleshooting).
+- `--help`, `-h` — show the help message.
+
+With no options, Donna launches its desktop chat UI.
+
 ## First-Run Checklist
 
 1. Start Donna once so it can create the default TOML config.
@@ -74,6 +88,9 @@ The MVP desktop UI has an avatar area and a chat panel.
 - Press `Tab` to cycle configured chat models. Donna saves the selected model id
   back to TOML.
 - Donna follows the configured UI theme: `auto`, `light`, or `dark`.
+- Donna always shows times in your local timezone, formatted per the configured
+  `[ui].time_format`: 24-hour (`15:30`) by default, or 12-hour with AM/PM
+  (`3:30 PM`).
 
 Donna currently responds in shell mode. It records your message in the in-memory
 session, attempts structured memory/todo/person extraction, and replies with the
@@ -116,6 +133,7 @@ Example MVP config:
 theme = "auto"
 donna_message_color = "#eef5ff"
 user_message_color = "#eaf7ef"
+time_format = "24h"
 
 [avatar]
 character = "donna"
@@ -132,6 +150,7 @@ label = "Ollama local"
 provider = "ollama"
 model = "llama3.1"
 base_url = "http://localhost:11434"
+context_length = 8192
 
 [[ai.models]]
 id = "openai-compatible"
@@ -202,6 +221,24 @@ The `[ui].theme` value accepts:
 - `auto`: follow the operating system theme when available.
 - `light`: force Donna's light theme.
 - `dark`: force Donna's dark theme.
+
+The `[ui].time_format` value accepts:
+
+- `24h`: 24-hour clock, e.g. `15:30` (default).
+- `12h`: 12-hour clock with AM/PM, e.g. `3:30 PM`.
+
+Times are always shown in your local timezone; this setting only changes the
+12h/24h formatting.
+
+For an Ollama model, set `context_length` to the context window (in tokens)
+Ollama should load the model with, sent as the `num_ctx` chat option. Donna's
+own system prompt (tool catalog, persona, guardrails) is already several
+thousand tokens by itself; leaving `context_length` unset falls back to
+Ollama's/the model's own default (often 2048), which silently truncates that
+prompt with no error — usually showing up as the model losing track of tool
+instructions or ignoring earlier context. `8192` is a reasonable starting
+point; raise it further for long conversations or if your model/hardware
+supports it.
 
 ## AI Providers
 
@@ -514,6 +551,12 @@ will not run in this state.
 
 The last sync for that source failed or was skipped while offline. Treat local
 results from that source as potentially outdated until a later sync succeeds.
+
+Synced data looks wrong, missing, or incomplete
+
+Incremental (delta) syncs can drift if Graph changed what it returns for a
+source. Run `donna --reset-sync [all|calendar|outlook|teams]` and restart
+Donna to force a full resync of that source from scratch.
 
 Microsoft admin consent error
 

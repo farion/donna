@@ -62,6 +62,17 @@ impl ChatSession {
         true
     }
 
+    /// Removes a message outright, used to discard a streaming placeholder
+    /// bubble when the request fails — system/provider errors are shown as
+    /// a notice, not as something Donna "said", so no bubble should remain.
+    pub fn remove_message(&mut self, id: u64) -> bool {
+        let Some(index) = self.messages.iter().position(|message| message.id == id) else {
+            return false;
+        };
+        self.messages.remove(index);
+        true
+    }
+
     fn push_message(&mut self, speaker: Speaker, text: impl Into<String>) -> Option<u64> {
         let text = text.into();
         let text = text.trim();

@@ -1,7 +1,12 @@
 use super::ui_style::palette_for;
 use super::{DonnaApp, status};
-use eframe::egui::{self, Align, FontId, Key, Label, Layout, Margin, RichText, TextEdit};
-use egui_phosphor::regular::{CIRCLE_NOTCH, MICROSOFT_TEAMS_LOGO};
+use eframe::egui::ecolor::Hsva;
+use eframe::egui::{self, Align, Color32, FontId, Key, Label, Layout, Margin, RichText, TextEdit};
+use egui_phosphor::regular::{AIRPLANE_TAKEOFF, CHECK, CIRCLE_NOTCH, MICROSOFT_TEAMS_LOGO};
+
+/// Seconds for one full hue rotation of an active-state icon's rainbow
+/// animation.
+const ICON_RAINBOW_CYCLE_SECONDS: f64 = 2.5;
 
 const COMPACT_CHAT_BAR_WIDTH: f32 = 180.0;
 const COMPACT_CHAT_BAR_HEIGHT: f32 = 88.0;
@@ -58,36 +63,64 @@ impl DonnaApp {
 
         if compact {
             let width = ui.available_width();
-            ui.add(Label::new(chat_bar_text(status_label, palette.notice_text)).wrap());
-            ui.add(Label::new(chat_bar_text(model_label, palette.notice_text)).wrap());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add(Label::new(chat_bar_text(status_label, palette.notice_text)).wrap());
+                self.render_microsoft_sync_icon(ui, 13.0);
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add(Label::new(chat_bar_text(model_label, palette.notice_text)).wrap());
+                self.render_model_status_icon(ui, palette.notice_text, 13.0);
+            });
             ui.set_min_width(width);
             return;
         }
 
         ui.horizontal(|ui| {
             ui.label(chat_bar_text(status_label, palette.notice_text));
+            self.render_microsoft_sync_icon(ui, 14.0);
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if self.render_model_status_icon(ui, palette.notice_text, 13.0) {
+                    ui.add_space(4.0);
+                }
                 ui.label(chat_bar_text(model_label, palette.notice_text));
             });
         });
     }
 
+    fn render_microsoft_sync_icon(&self, ui: &mut egui::Ui, size: f32) {
+        if !self.microsoft_sync_in_progress {
+            return;
+        }
+        ui.add_space(4.0);
+        let color = rainbow_color(ui.ctx());
+        ui.label(activity_icon(MICROSOFT_TEAMS_LOGO, color, size));
+    }
+
+    /// Renders the model warm-up status icon, if any, and reports whether
+    /// one was drawn so callers can decide whether to reserve space for it.
+    fn render_model_status_icon(&self, ui: &mut egui::Ui, notice_color: Color32, size: f32) -> bool {
+        if self.is_selected_model_warming_up() {
+            let color = rainbow_color(ui.ctx());
+            ui.label(activity_icon(AIRPLANE_TAKEOFF, color, size));
+            return true;
+        }
+        if self.is_selected_model_warmed_up() {
+            ui.label(activity_icon(CHECK, notice_color, size));
+            return true;
+        }
+        false
+    }
+
     pub(super) fn render_activity_strip(&self, ui: &mut egui::Ui, compact: bool) {
         let palette = palette_for(ui.ctx().theme());
         let icon_size = if compact { 13.0 } else { 14.0 };
-        let task_running = self
-            .store
-            .as_ref()
-            .and_then(|store| store.running_task_run_count().ok())
-            .unwrap_or(0);
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            if self.microsoft_sync_in_progress {
-                ui.label(activity_icon(MICROSOFT_TEAMS_LOGO, palette.notice_text, icon_size));
-            }
-            if task_running > 0 {
+            if self.running_task_count > 0 {
                 ui.label(activity_icon(CIRCLE_NOTCH, palette.notice_text, icon_size));
             }
         });
@@ -203,6 +236,17 @@ fn chat_bar_text(text: impl Into<String>, color: egui::Color32) -> RichText {
     RichText::new(text)
         .font(FontId::proportional(13.0))
         .color(color)
+}
+
+/// Computes a smoothly cycling rainbow color for an active-state icon (e.g.
+/// syncing, warming up) and keeps the animation going by requesting the next
+/// repaint — only called while that icon is actually visible, so idle frames
+/// stay untouched.
+fn rainbow_color(ctx: &egui::Context) -> Color32 {
+    ctx.request_repaint_after(std::time::Duration::from_millis(33));
+    let time = ctx.input(|input| input.time);
+    let hue = (time / ICON_RAINBOW_CYCLE_SECONDS).fract() as f32;
+    Hsva::new(hue, 0.75, 0.95, 1.0).into()
 }
 
 fn activity_icon(icon: &str, color: egui::Color32, size: f32) -> RichText {

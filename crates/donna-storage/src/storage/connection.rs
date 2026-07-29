@@ -35,9 +35,12 @@ impl LocalStore {
 
     fn from_connection(connection: Connection) -> Result<Self, StorageError> {
         let store = Self { connection };
-        store
-            .connection
-            .execute_batch("PRAGMA foreign_keys = ON;")?;
+        store.connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;",
+        )?;
         migrations::apply_migrations(&store.connection)?;
         Ok(store)
     }

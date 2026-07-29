@@ -190,6 +190,7 @@ fn messages_do_not_expand_computed_chat_width() {
             model: "mock".to_owned(),
             base_url: Some("mock://local".to_owned()),
             secret_ref: None,
+            context_length: None,
         });
     });
 

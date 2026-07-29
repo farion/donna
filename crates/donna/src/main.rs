@@ -1,12 +1,15 @@
 use donna_config::AppConfig;
 use donna_integrations::auth::run_auth_wizard;
 use donna_integrations::microsoft::background_sync::run_sync_once as run_microsoft_sync_once;
+use donna_integrations::microsoft::calendar::CALENDAR_SOURCE;
+use donna_integrations::microsoft::outlook::OUTLOOK_MAIL_SOURCE;
+use donna_integrations::microsoft::teams::{TEAMS_CHANNEL_SOURCE, TEAMS_CHAT_SOURCE};
 use donna_integrations::secrets::KeyringSecretStore;
 use donna_storage::LocalStore;
 use donna_ui::app::{DonnaApp, native_options};
 use donna_ui::ipc::{
-    IpcEvent, default_socket_path, release_socket_path, remove_stale_socket, send_wakeup,
-    start_wakeup_listener, wakeup_window,
+    IpcEvent, default_socket_path, new_repaint_signal, release_socket_path, remove_stale_socket,
+    send_wakeup, start_wakeup_listener,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -19,13 +22,26 @@ fn main() -> eframe::Result<()> {
     let config_path = AppConfig::default_path();
     let socket_path = default_socket_path(&config_path);
 
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help();
+        return Ok(());
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--reset-sync") {
+        let target = args.get(index + 1).map(String::as_str).unwrap_or("all");
+        if let Err(error) = reset_sync(&config_path, target) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     if args.iter().any(|arg| arg == "--wakeup") {
         if let Err(error) = send_wakeup(&socket_path) {
             remove_stale_socket(&socket_path);
             eprintln!("donna wakeup: {error}");
             std::process::exit(1);
         }
-        wakeup_window();
         return Ok(());
     }
 
@@ -37,9 +53,24 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Single-instance guard: if another Donna is already listening on the
+    // wakeup socket, wake it up and exit instead of starting a second full
+    // UI process. Without this check, a second launch would silently delete
+    // the first instance's socket file (see `start_wakeup_listener` below)
+    // and orphan it — both processes then keep running side by side, which
+    // is how duplicate `donna-ui` processes accumulate.
+    if send_wakeup(&socket_path).is_ok() {
+        eprintln!("donna: another instance is already running; sent wakeup and exiting");
+        return Ok(());
+    }
+    remove_stale_socket(&socket_path);
+
     let (wakeup_sender, wakeup_receiver) = mpsc::channel();
     let wakeup_receiver = Arc::new(Mutex::new(wakeup_receiver));
-    if let Err(error) = start_wakeup_listener(socket_path.clone(), wakeup_sender) {
+    let repaint_signal = new_repaint_signal();
+    if let Err(error) =
+        start_wakeup_listener(socket_path.clone(), wakeup_sender, repaint_signal.clone())
+    {
         eprintln!(
             "donna ipc: failed to listen on {}: {error}",
             socket_path.display()
@@ -56,6 +87,7 @@ fn main() -> eframe::Result<()> {
                 creation,
                 app_hide_requested.clone(),
                 app_wakeup_receiver.clone(),
+                repaint_signal.clone(),
             )))
         }),
     )?;
@@ -64,6 +96,61 @@ fn main() -> eframe::Result<()> {
         run_hidden_daemon(wakeup_receiver, socket_path);
     }
 
+    Ok(())
+}
+
+fn print_help() {
+    println!(
+        "Donna — a local-first personal work-life assistant.
+
+USAGE:
+    donna [OPTIONS]
+
+OPTIONS:
+    --auth                  Run the Microsoft Graph / AI provider auth setup wizard.
+    --wakeup                Wake and show an already-running hidden Donna instance.
+    --reset-sync [TARGET]   Clear synced Microsoft data's sync progress so the next
+                            start does a full resync instead of an incremental one.
+                            TARGET is one of: all (default), calendar, outlook, teams.
+    --help, -h              Show this help message.
+
+With no options, Donna launches its desktop chat UI."
+    );
+}
+
+fn reset_sync(config_path: &std::path::Path, target: &str) -> Result<(), String> {
+    let sources: &[&str] = match target {
+        "all" => &[
+            CALENDAR_SOURCE,
+            OUTLOOK_MAIL_SOURCE,
+            TEAMS_CHAT_SOURCE,
+            TEAMS_CHANNEL_SOURCE,
+        ],
+        "calendar" => &[CALENDAR_SOURCE],
+        "outlook" => &[OUTLOOK_MAIL_SOURCE],
+        "teams" => &[TEAMS_CHAT_SOURCE, TEAMS_CHANNEL_SOURCE],
+        other => {
+            return Err(format!(
+                "donna --reset-sync: unknown target '{other}'. Use all, calendar, outlook, or teams."
+            ));
+        }
+    };
+
+    let (config, _) = AppConfig::load_or_default_at(config_path);
+    let store = LocalStore::open(&config.data.database_path)
+        .map_err(|error| format!("donna --reset-sync: storage unavailable: {error}"))?;
+
+    let mut cleared = 0usize;
+    for source in sources {
+        cleared += store
+            .reset_sync_state(Some(source))
+            .map_err(|error| format!("donna --reset-sync: {error}"))?;
+    }
+
+    println!(
+        "donna: cleared sync state for '{target}' ({cleared} source record(s)). \
+         The next start will do a full resync."
+    );
     Ok(())
 }
 

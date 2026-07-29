@@ -56,6 +56,16 @@ fn migrations() -> &'static [Migration] {
             name: "todo_reminder_severity",
             sql: TODO_REMINDER_SEVERITY,
         },
+        Migration {
+            version: 4,
+            name: "calendar_event_attendees",
+            sql: CALENDAR_EVENT_ATTENDEES,
+        },
+        Migration {
+            version: 5,
+            name: "calendar_event_is_all_day",
+            sql: CALENDAR_EVENT_IS_ALL_DAY,
+        },
     ]
 }
 
@@ -282,6 +292,22 @@ ALTER TABLE todos ADD COLUMN severity TEXT NOT NULL DEFAULT 'middle'
     CHECK (severity IN ('low', 'middle', 'high'));
 "#;
 
+const CALENDAR_EVENT_ATTENDEES: &str = r#"
+CREATE TABLE calendar_event_attendees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    calendar_event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+    name TEXT,
+    email TEXT,
+    is_optional INTEGER NOT NULL DEFAULT 0 CHECK (is_optional IN (0, 1)),
+    UNIQUE (calendar_event_id, email)
+);
+"#;
+
+const CALENDAR_EVENT_IS_ALL_DAY: &str = r#"
+ALTER TABLE calendar_events ADD COLUMN is_all_day INTEGER NOT NULL DEFAULT 0
+    CHECK (is_all_day IN (0, 1));
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::apply_migrations;
@@ -298,7 +324,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count migrations");
-        assert_eq!(version_count, 3);
+        assert_eq!(version_count, 5);
 
         for table in [
             "memories",
@@ -308,6 +334,7 @@ mod tests {
             "teams_messages",
             "outlook_messages",
             "calendar_events",
+            "calendar_event_attendees",
             "task_runs",
             "task_findings",
             "sync_state",

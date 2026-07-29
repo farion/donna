@@ -27,6 +27,60 @@ pub struct UiConfig {
     pub theme: UiThemeMode,
     pub donna_message_color: String,
     pub user_message_color: String,
+    pub time_format: TimeFormatMode,
+}
+
+/// Controls whether Donna prints times like "15:30" or "3:30 PM" wherever it
+/// shows a timestamp to the user (appointments, mail, etc.) — always in the
+/// local timezone either way. Custom (de)serialization is used instead of a
+/// derive because "24h"/"12h" aren't valid Rust enum-variant identifiers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TimeFormatMode {
+    #[default]
+    TwentyFourHour,
+    TwelveHour,
+}
+
+impl TimeFormatMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "24h" | "24-hour" | "24hour" | "twenty-four-hour" => Some(Self::TwentyFourHour),
+            "12h" | "12-hour" | "12hour" | "am/pm" | "am-pm" | "ampm" | "twelve-hour" => {
+                Some(Self::TwelveHour)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TwentyFourHour => "24h",
+            Self::TwelveHour => "12h",
+        }
+    }
+}
+
+impl Serialize for TimeFormatMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeFormatMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        TimeFormatMode::parse(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid time format \"{value}\": expected \"24h\" or \"12h\""
+            ))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +147,15 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<String>,
+    /// Ollama-only: the context window (in tokens) to request via the
+    /// `num_ctx` chat option. Donna's own system prompt (tool catalog,
+    /// guardrails, persona) is several thousand tokens on its own, well
+    /// past Ollama's/most Modelfiles' default of 2048 — leaving this unset
+    /// silently truncates that prompt (often the tool instructions or
+    /// catalog) with no error, causing intermittent, hard-to-diagnose tool
+    /// call failures. Ignored by non-Ollama providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -237,6 +300,7 @@ impl Default for UiConfig {
             theme: UiThemeMode::Auto,
             donna_message_color: "#eef5ff".to_owned(),
             user_message_color: "#eaf7ef".to_owned(),
+            time_format: TimeFormatMode::TwentyFourHour,
         }
     }
 }
@@ -394,6 +458,11 @@ fn default_models() -> Vec<ModelConfig> {
             model: "llama3.1".to_owned(),
             base_url: Some("http://localhost:11434".to_owned()),
             secret_ref: None,
+            // Donna's tool catalog + persona + guardrails alone are already
+            // several thousand tokens; Ollama's/most Modelfiles' default of
+            // 2048 silently truncates that, so request a window generous
+            // enough to hold it plus conversation, todos, and memories.
+            context_length: Some(8192),
         },
         ModelConfig {
             id: "openai-compatible".to_owned(),
@@ -402,6 +471,7 @@ fn default_models() -> Vec<ModelConfig> {
             model: "gpt-4.1-mini".to_owned(),
             base_url: Some("https://api.openai.com/v1".to_owned()),
             secret_ref: Some("donna/openai".to_owned()),
+            context_length: None,
         },
         ModelConfig {
             id: "github-copilot-compatible".to_owned(),
@@ -410,6 +480,7 @@ fn default_models() -> Vec<ModelConfig> {
             model: "gpt-4.1".to_owned(),
             base_url: Some("https://api.githubcopilot.com".to_owned()),
             secret_ref: Some("donna/github-copilot".to_owned()),
+            context_length: None,
         },
     ]
 }

@@ -4,8 +4,16 @@ use super::{
 use donna_core::model::ModelDefinition;
 use serde::{Deserialize, Serialize};
 use std::io::BufRead;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+/// How long Ollama should keep the model loaded after a request, so it
+/// survives idle gaps between chat turns instead of unloading and forcing
+/// another cold-load timeout on the next message.
+const KEEP_ALIVE_DURATION: &str = "30m";
+const CHAT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Cold model loads can take much longer than a normal chat turn.
+const MODEL_WARM_UP_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct OllamaProvider;
 
@@ -21,7 +29,37 @@ impl OllamaProvider {
             model: model.model.clone(),
             messages,
             stream: request.stream,
+            keep_alive: Some(KEEP_ALIVE_DURATION.to_owned()),
+            options: model.context_length.map(|num_ctx| OllamaOptions { num_ctx }),
         }
+    }
+
+    /// Pings Ollama with an empty prompt so it loads the model into memory
+    /// ahead of the user's first real message, avoiding a cold-load timeout.
+    pub fn warm_up(&self, model: &ModelDefinition) -> Result<(), AiError> {
+        let base_url = model
+            .base_url
+            .as_deref()
+            .ok_or_else(|| AiError::MissingBaseUrl(model.id.clone()))?;
+        let request = AiRequest::new(String::new());
+        let payload = Self::chat_payload(model, &request);
+        let response = ollama_http_client()
+            .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
+            .timeout(MODEL_WARM_UP_TIMEOUT)
+            .json(&payload)
+            .send()
+            .map_err(|error| AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("failed to warm up Ollama model: {error}"),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("Ollama warm-up returned {status}"),
+            });
+        }
+        Ok(())
     }
 
     pub fn complete_streaming(
@@ -36,8 +74,9 @@ impl OllamaProvider {
             .ok_or_else(|| AiError::MissingBaseUrl(model.id.clone()))?;
         let mut request = request.clone();
         request.stream = true;
-        let response = reqwest::blocking::Client::new()
+        let response = ollama_http_client()
             .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
+            .timeout(CHAT_REQUEST_TIMEOUT)
             .json(&Self::chat_payload(model, &request))
             .send()
             .map_err(|error| AiError::ProviderUnavailable {
@@ -111,20 +150,27 @@ impl AiProvider for OllamaProvider {
             .ok_or_else(|| AiError::MissingBaseUrl(model.id.clone()))?;
         let mut request = request.clone();
         request.stream = false;
-        let body =
-            serde_json::to_string(&Self::chat_payload(model, &request)).map_err(|error| {
-                AiError::ProviderUnavailable {
-                    provider: self.family(),
-                    detail: format!("failed to encode Ollama request: {error}"),
-                }
+        let response = ollama_http_client()
+            .post(format!("{}/api/chat", base_url.trim_end_matches('/')))
+            .timeout(CHAT_REQUEST_TIMEOUT)
+            .json(&Self::chat_payload(model, &request))
+            .send()
+            .map_err(|error| AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("failed to send Ollama request: {error}"),
             })?;
-        let response_body = post_ollama_chat(base_url, &body)?;
-        let response =
-            serde_json::from_str::<OllamaChatResponse>(&response_body).map_err(|error| {
-                AiError::ProviderUnavailable {
-                    provider: self.family(),
-                    detail: format!("failed to decode Ollama response: {error}"),
-                }
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("Ollama returned {status}"),
+            });
+        }
+        let response = response
+            .json::<OllamaChatResponse>()
+            .map_err(|error| AiError::ProviderUnavailable {
+                provider: self.family(),
+                detail: format!("failed to decode Ollama response: {error}"),
             })?;
 
         if let Some(error) = response.error {
@@ -153,6 +199,19 @@ pub struct OllamaChatRequest {
     pub model: String,
     pub messages: Vec<WireChatMessage>,
     pub stream: bool,
+    pub keep_alive: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<OllamaOptions>,
+}
+
+/// Ollama's per-request model options. Only `num_ctx` (the context window,
+/// in tokens) is set today; see `ModelConfig::context_length` for why it
+/// matters — Ollama silently truncates the prompt to fit whatever context
+/// size the model loaded with (2048 by default for many models) if this
+/// isn't sent explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OllamaOptions {
+    pub num_ctx: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,13 +228,6 @@ struct OllamaChatResponse {
     done: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HttpEndpoint {
-    host_header: String,
-    address: String,
-    path_prefix: String,
-}
-
 fn message_to_wire(message: &AiMessage) -> WireChatMessage {
     WireChatMessage {
         role: message.role,
@@ -188,88 +240,18 @@ fn message_to_wire(message: &AiMessage) -> WireChatMessage {
     }
 }
 
-fn post_ollama_chat(base_url: &str, body: &str) -> Result<String, AiError> {
-    let endpoint = parse_http_endpoint(base_url)?;
-    let request_path = format!("{}/api/chat", endpoint.path_prefix.trim_end_matches('/'));
-    let mut stream =
-        TcpStream::connect(&endpoint.address).map_err(|error| AiError::ProviderUnavailable {
-            provider: ProviderFamily::Ollama,
-            detail: format!(
-                "could not connect to Ollama at {}: {error}",
-                endpoint.address
-            ),
-        })?;
-    let request = format!(
-        "POST {request_path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        endpoint.host_header,
-        body.len(),
-        body
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| AiError::ProviderUnavailable {
-            provider: ProviderFamily::Ollama,
-            detail: format!("failed to send Ollama request: {error}"),
-        })?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| AiError::ProviderUnavailable {
-            provider: ProviderFamily::Ollama,
-            detail: format!("failed to read Ollama response: {error}"),
-        })?;
-
-    let (headers, body) =
-        response
-            .split_once("\r\n\r\n")
-            .ok_or_else(|| AiError::ProviderUnavailable {
-                provider: ProviderFamily::Ollama,
-                detail: "Ollama returned an invalid HTTP response".to_owned(),
-            })?;
-    let status = headers.lines().next().unwrap_or_default();
-    if !status.contains(" 200 ") {
-        return Err(AiError::ProviderUnavailable {
-            provider: ProviderFamily::Ollama,
-            detail: format!("Ollama returned {status}"),
-        });
-    }
-
-    Ok(body.to_owned())
-}
-
-fn parse_http_endpoint(base_url: &str) -> Result<HttpEndpoint, AiError> {
-    let rest =
-        base_url
-            .trim()
-            .strip_prefix("http://")
-            .ok_or_else(|| AiError::ProviderUnavailable {
-                provider: ProviderFamily::Ollama,
-                detail: "Ollama provider currently supports plain http:// endpoints".to_owned(),
-            })?;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if authority.is_empty() {
-        return Err(AiError::ProviderUnavailable {
-            provider: ProviderFamily::Ollama,
-            detail: "Ollama base URL is missing a host".to_owned(),
-        });
-    }
-
-    let address = if authority.contains(':') {
-        authority.to_owned()
-    } else {
-        format!("{authority}:80")
-    };
-    let path_prefix = if path.is_empty() {
-        String::new()
-    } else {
-        format!("/{path}")
-    };
-
-    Ok(HttpEndpoint {
-        host_header: authority.to_owned(),
-        address,
-        path_prefix,
+/// A `reqwest::blocking::Client` owns a dedicated background thread (running
+/// its own Tokio runtime) for as long as it's alive. Building a fresh one
+/// per request — as this used to do — churns a new thread on every chat
+/// turn and every warm-up, and those threads don't wind down instantly,
+/// so they can pile up faster than they're reclaimed. Build it once and
+/// reuse it, applying the timeout per-request instead of per-client.
+fn ollama_http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .build()
+            .expect("failed to build Ollama HTTP client")
     })
 }
 

@@ -6,8 +6,8 @@ use donna_storage::LocalStore;
 pub(super) fn execute(store: &LocalStore, user_message: &str) -> String {
     format_day_appointments(
         store,
-        1,
-        "tomorrow",
+        0,
+        "today",
         wants_single_appointment(user_message),
         wants_remaining_only(user_message),
         wants_attendees(user_message),

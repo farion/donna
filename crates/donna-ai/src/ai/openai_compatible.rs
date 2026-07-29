@@ -1,6 +1,7 @@
 use super::{AiError, AiMessage, AiProvider, AiRequest, AiResponse, AiRole, ProviderFamily};
 use donna_core::model::ModelDefinition;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 const CHATGPT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -66,7 +67,7 @@ impl OpenAiCompatibleProvider {
         base_url: &str,
         token: &str,
     ) -> Result<AiResponse, AiError> {
-        let response = reqwest::blocking::Client::new()
+        let response = openai_http_client()
             .post(format!(
                 "{}/chat/completions",
                 base_url.trim_end_matches('/')
@@ -120,8 +121,7 @@ impl OpenAiCompatibleProvider {
         request: &AiRequest,
         auth: &ParsedAuth,
     ) -> Result<AiResponse, AiError> {
-        let client = reqwest::blocking::Client::new();
-        let mut builder = client
+        let mut builder = openai_http_client()
             .post(CHATGPT_CODEX_RESPONSES_URL)
             .bearer_auth(&auth.token)
             .json(&Self::responses_payload(model, request));
@@ -369,6 +369,22 @@ fn trim_error_body(body: &str) -> String {
     format!("{}...", &trimmed[..MAX_LEN])
 }
 
+/// A `reqwest::blocking::Client` owns a dedicated background thread (running
+/// its own Tokio runtime) for as long as it's alive — see `ollama_http_client`
+/// in `ollama.rs` and `shared_http_client` in the Microsoft Graph client for
+/// the same fix. Building a fresh one per request, as this used to do, churns
+/// a new thread on every chat turn (and every second round-trip), and those
+/// threads don't wind down instantly, so they pile up. Build it once and
+/// reuse it.
+fn openai_http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .build()
+            .expect("failed to build OpenAI-compatible HTTP client")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -424,6 +440,7 @@ mod tests {
             model: "gpt-4.1-mini".to_owned(),
             base_url: Some("https://api.openai.com/v1".to_owned()),
             secret_ref: Some("donna/openai".to_owned()),
+            context_length: None,
         };
         let request = AiRequest::new("system").with_message(AiMessage::trusted(AiRole::User, "hi"));
 
@@ -444,6 +461,7 @@ mod tests {
             model: "gpt-5.5".to_owned(),
             base_url: Some("https://api.openai.com/v1".to_owned()),
             secret_ref: Some("donna/openai".to_owned()),
+            context_length: None,
         };
         let request = AiRequest::new("system").with_message(AiMessage::trusted(AiRole::User, "hi"));
 
